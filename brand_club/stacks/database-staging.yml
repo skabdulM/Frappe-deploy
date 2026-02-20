@@ -54,3 +54,8 @@ networks:
     name: brandclub-staging-mariadb
     driver: overlay
     attachable: true
+
+# =====================================================
+# ENVIRONMENT VARIABLES REQUIRED (set in Portainer)
+# =====================================================
+# DB_ROOT_PASSWORD=mannan@123

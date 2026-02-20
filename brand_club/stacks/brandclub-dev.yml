@@ -17,26 +17,16 @@ services:
       replicas: 1
       restart_policy:
         condition: on-failure
-        delay: 5s
-        max_attempts: 3
       update_config:
         parallelism: 1
         delay: 10s
         order: start-first
     environment:
-      # Redis Configuration
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      
-      # Database Configuration
       DB_HOST: mariadb
-      DB_PORT: 3306
-      
-      # Frappe Configuration
       FRAPPE_SITE_NAME_HEADER: $$host
       SOCKETIO_PORT: 9000
-      
-      # Development Settings
       DEVELOPER_MODE: 1
       FRAPPE_LOGGING_LEVEL: DEBUG
       
@@ -339,3 +329,10 @@ networks:
   traefik-public:
     external: true
     name: traefik-public
+
+# =====================================================
+# ENVIRONMENT VARIABLES REQUIRED (set in Portainer)
+# =====================================================
+# DEV_DOMAIN=develop-erp.brandclub.site
+# MAILPIT_DOMAIN=mailpit.develop-erp.brandclub.site
+# CLIENT_MAX_BODY_SIZE=50m

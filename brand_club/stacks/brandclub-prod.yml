@@ -13,28 +13,13 @@ version: "3.8"
 services:
   # ===== Backend Service (Gunicorn) =====
   backend:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 2
       restart_policy:
         condition: on-failure
         delay: 5s
         max_attempts: 3
-      update_config:
-        parallelism: 1
-        delay: 20s
-        order: start-first
-        failure_action: rollback
-      rollback_config:
-        parallelism: 1
-        delay: 10s
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
-        reservations:
-          cpus: '1.0'
-          memory: 1G
+
     environment:
       # Redis Configuration
       REDIS_CACHE: redis-cache:6379
@@ -60,30 +45,15 @@ services:
       - brandclub-prod-network
       - brandclub-prod-mariadb
       - shared-services
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 90s
+
 
   # ===== Frontend Service (Nginx) =====
   frontend:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 2
       restart_policy:
         condition: on-failure
-      update_config:
-        order: start-first
-        delay: 10s
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          cpus: '0.5'
-          memory: 256M
+
       labels:
         # Traefik Configuration
         - traefik.enable=true
@@ -136,15 +106,11 @@ services:
 
   # ===== WebSocket Service =====
   websocket:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 2
       restart_policy:
         condition: on-failure
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
+ 
     command:
       - node
       - /home/frappe/frappe-bench/apps/frappe/socketio.js
@@ -158,18 +124,11 @@ services:
 
   # ===== Queue Workers =====
   queue-default:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 2
       restart_policy:
         condition: on-failure
-      resources:
-        limits:
-          cpus: '1.5'
-          memory: 1.5G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
+
     command:
       - bench
       - worker
@@ -187,15 +146,11 @@ services:
       - brandclub-prod-mariadb
 
   queue-short:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 2
       restart_policy:
         condition: on-failure
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
+ 
     command:
       - bench
       - worker
@@ -213,15 +168,11 @@ services:
       - brandclub-prod-mariadb
 
   queue-long:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 2
       restart_policy:
         condition: on-failure
-      resources:
-        limits:
-          cpus: '1.5'
-          memory: 1.5G
+ 
     command:
       - bench
       - worker
@@ -240,9 +191,8 @@ services:
 
   # ===== Scheduler Service =====
   scheduler:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 1
       restart_policy:
         condition: on-failure
       placement:
@@ -264,9 +214,8 @@ services:
 
   # ===== Backup Service (Daily at 2 AM UTC) =====
   backup:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 1
       restart_policy:
         condition: on-failure
       placement:
@@ -335,9 +284,8 @@ services:
 
   # ===== Migration Service =====
   migration:
-    image: ghcr.io/brandclub/brand-club-erp:main
+    image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
-      replicas: 1
       restart_policy:
         condition: none
       placement:
@@ -366,7 +314,6 @@ services:
   redis-cache:
     image: redis:6.2-alpine
     deploy:
-      replicas: 1
       restart_policy:
         condition: on-failure
       placement:
@@ -392,7 +339,6 @@ services:
   redis-queue:
     image: redis:6.2-alpine
     deploy:
-      replicas: 1
       restart_policy:
         condition: on-failure
       placement:
@@ -455,3 +401,11 @@ networks:
   shared-services:
     external: true
     name: shared-services
+
+# =====================================================
+# ENVIRONMENT VARIABLES REQUIRED (set in Portainer)
+# =====================================================
+# PROD_DOMAIN=erp.brandclub.site
+# MAILPIT_DOMAIN=mailpit.erp.brandclub.site
+# CLIENT_MAX_BODY_SIZE=50m
+# TAG_NAME=main (optional, defaults to 'main' if not set)

@@ -32,6 +32,7 @@ services:
 
   portainer:
     image: portainer/portainer-ce:latest
+    command: --tlsskipverify
     deploy:
       mode: replicated
       replicas: 1
@@ -79,3 +80,7 @@ networks:
   traefik-public:
     external: true
     name: traefik-public
+# =====================================================
+# ENVIRONMENT VARIABLES REQUIRED (set in Portainer)
+# =====================================================
+# PORTAINER_DOMAIN=portainer.example.com

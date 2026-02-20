@@ -35,19 +35,11 @@ services:
           cpus: '0.5'
           memory: 512M
     environment:
-      # Redis Configuration
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      
-      # Database Configuration
       DB_HOST: mariadb
-      DB_PORT: 3306
-      
-      # Frappe Configuration
       FRAPPE_SITE_NAME_HEADER: $$host
       SOCKETIO_PORT: 9000
-      
-      # Staging Settings
       FRAPPE_LOGGING_LEVEL: INFO
       
     volumes:
@@ -370,3 +362,10 @@ networks:
   shared-services:
     external: true
     name: shared-services
+
+# =====================================================
+# ENVIRONMENT VARIABLES REQUIRED (set in Portainer)
+# =====================================================
+# STAGING_DOMAIN=staging-erp.brandclub.site
+# MAILPIT_DOMAIN=mailpit.staging-erp.brandclub.site
+# CLIENT_MAX_BODY_SIZE=50m
