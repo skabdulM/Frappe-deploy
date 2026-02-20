@@ -3,16 +3,16 @@ version: "3.8"
 # =====================================================
 # Traefik - Reverse Proxy & SSL Termination
 # =====================================================
+# Uses: Docker Swarm provider with Let's Encrypt TLS challenge
 # Features:
 # - Automatic SSL with Let's Encrypt
 # - HTTP to HTTPS redirect
 # - Dashboard with basic auth
-# - Request body size limits
 # =====================================================
 
 services:
   traefik:
-    image: traefik:v3.0
+    image: traefik:${TRAEFIK_VERSION:-v3.6}
     deploy:
       replicas: 1
       restart_policy:
@@ -25,57 +25,48 @@ services:
         - traefik.constraint-label=traefik-public
         - traefik.docker.network=traefik-public
         
-        # Dashboard
-        - traefik.http.routers.traefik.rule=Host(`${TRAEFIK_DOMAIN:-traefik.example.com}`)
-        - traefik.http.routers.traefik.entrypoints=https
-        - traefik.http.routers.traefik.tls=true
-        - traefik.http.routers.traefik.tls.certresolver=le
-        - traefik.http.routers.traefik.service=api@internal
-        - traefik.http.routers.traefik.middlewares=traefik-auth
-        - traefik.http.services.traefik.loadbalancer.server.port=8080
-        
-        # Basic Auth Middleware
-        - traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_AUTH}
+        # Basic Auth for Dashboard
+        - traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_AUTH}
         
         # HTTPS Redirect Middleware
         - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
         - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
         
-        # Body Size Limit Middleware (for large file uploads)
-        - traefik.http.middlewares.body-size-limit.buffering.maxRequestBodyBytes=104857600
-        - traefik.http.middlewares.body-size-limit.buffering.memRequestBodyBytes=104857600
+        # Dashboard Router - HTTP (redirect to HTTPS)
+        - traefik.http.routers.traefik-http.rule=Host(`${TRAEFIK_DOMAIN:-traefik.brandclub.site}`)
+        - traefik.http.routers.traefik-http.entrypoints=http
+        - traefik.http.routers.traefik-http.middlewares=https-redirect
+        
+        # Dashboard Router - HTTPS
+        - traefik.http.routers.traefik-https.rule=Host(`${TRAEFIK_DOMAIN:-traefik.brandclub.site}`)
+        - traefik.http.routers.traefik-https.entrypoints=https
+        - traefik.http.routers.traefik-https.tls=true
+        - traefik.http.routers.traefik-https.tls.certresolver=le
+        - traefik.http.routers.traefik-https.service=api@internal
+        - traefik.http.routers.traefik-https.middlewares=admin-auth
+        
+        # API Service
+        - traefik.http.services.traefik.loadbalancer.server.port=8080
     command:
-      # API and Dashboard
-      - --api.dashboard=true
-      - --api.insecure=false
+      # Providers
+      - --providers.docker
+      - --providers.docker.constraints=Label(`traefik.constraint-label`,`traefik-public`)
+      - --providers.docker.exposedbydefault=false
+      - --providers.swarm.endpoint=unix:///var/run/docker.sock
       
-      # Entry Points
+      # Entry Points (Host mode for direct port access)
       - --entrypoints.http.address=:80
       - --entrypoints.https.address=:443
       
-      # Docker provider
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --providers.docker.constraints=Label(`traefik.constraint-label`,`traefik-public`)
-      - --providers.docker.network=traefik-public
-      
-      # Swarm provider (replaces deprecated swarmmode)
-      - --providers.swarm=true
-      - --providers.swarm.exposedbydefault=false
-      - --providers.swarm.endpoint=unix:///var/run/docker.sock
-      
-      # Let's Encrypt
+      # Let's Encrypt with TLS Challenge
       - --certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL:-admin@example.com}
-      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
-      - --certificatesresolvers.le.acme.httpchallenge=true
-      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=http
+      - --certificatesresolvers.le.acme.storage=/certificates/acme.json
+      - --certificatesresolvers.le.acme.tlschallenge=true
       
-      # Logging
+      # Logging & Monitoring
       - --log.level=INFO
-      - --accesslog=true
-      
-      # Metrics (optional)
-      - --metrics.prometheus=true
+      - --accesslog
+      - --api
     ports:
       - target: 80
         published: 80
@@ -85,7 +76,7 @@ services:
         mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - traefik-certificates:/letsencrypt
+      - traefik-certificates:/certificates
     networks:
       - traefik-public
 

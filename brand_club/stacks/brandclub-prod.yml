@@ -434,12 +434,14 @@ volumes:
 
 # ===== Networks =====
 networks:
-  # Internal network for Frappe services (created by database stack)
+  # Internal network for Frappe services (created by this stack)
   brandclub-prod-network:
-    external: true
+    external: false
     name: brandclub-prod-network
+    driver: overlay
+    attachable: true
 
-  # Isolated database network (created by database stack)
+  # Isolated database network (created by database-prod stack)
   brandclub-prod-mariadb:
     external: true
     name: brandclub-prod-mariadb
