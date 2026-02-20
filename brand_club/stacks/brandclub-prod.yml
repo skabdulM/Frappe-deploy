@@ -87,7 +87,7 @@ services:
       labels:
         # Traefik Configuration
         - traefik.enable=true
-        - traefik.docker.network=traefik-public
+        - traefik.swarm.network=traefik-public
         - traefik.constraint-label=traefik-public
         
         # HTTP Router (redirect to HTTPS)

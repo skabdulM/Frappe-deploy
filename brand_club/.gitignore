@@ -1,7 +1,7 @@
 # Environment files (contains secrets)
-config/*.env
-*.env
-!*.env.example
+# config/*.env
+# *.env
+# !*.env.example
 
 # Backup files
 /backups/

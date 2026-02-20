@@ -23,7 +23,7 @@ services:
       labels:
         - traefik.enable=true
         - traefik.constraint-label=traefik-public
-        - traefik.docker.network=traefik-public
+        - traefik.swarm.network=traefik-public
         
         # Basic Auth for Dashboard
         - traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_AUTH}
