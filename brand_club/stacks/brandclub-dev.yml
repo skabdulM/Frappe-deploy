@@ -12,7 +12,7 @@ version: "3.8"
 services:
   # ===== Backend Service (Gunicorn) =====
   backend:
-    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    image: ghcr.io/brandclub/brand-club-erp:dev
     deploy:
       replicas: 1
       restart_policy:
@@ -55,7 +55,7 @@ services:
 
   # ===== Frontend Service (Nginx) =====
   frontend:
-    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    image: ghcr.io/brandclub/brand-club-erp:dev
     deploy:
       replicas: 1
       restart_policy:
@@ -105,7 +105,7 @@ services:
 
   # ===== WebSocket Service =====
   websocket:
-    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    image: ghcr.io/brandclub/brand-club-erp:dev
     deploy:
       replicas: 1
       restart_policy:
@@ -123,7 +123,7 @@ services:
 
   # ===== Queue Workers =====
   queue-default:
-    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    image: ghcr.io/brandclub/brand-club-erp:dev
     deploy:
       replicas: 1
       restart_policy:
@@ -145,7 +145,7 @@ services:
       - brandclub-dev-mariadb
 
   queue-short:
-    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    image: ghcr.io/brandclub/brand-club-erp:dev
     deploy:
       replicas: 1
       restart_policy:
@@ -167,7 +167,7 @@ services:
       - brandclub-dev-mariadb
 
   queue-long:
-    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    image: ghcr.io/brandclub/brand-club-erp:dev
     deploy:
       replicas: 1
       restart_policy:
@@ -190,7 +190,7 @@ services:
 
   # ===== Scheduler Service =====
   scheduler:
-    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    image: ghcr.io/brandclub/brand-club-erp:dev
     deploy:
       replicas: 1
       restart_policy:
@@ -211,7 +211,7 @@ services:
 
   # ===== Migration Service =====
   migration:
-    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    image: ghcr.io/brandclub/brand-club-erp:dev
     deploy:
       replicas: 1
       restart_policy:

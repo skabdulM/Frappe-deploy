@@ -26,7 +26,7 @@ services:
         - traefik.swarm.network=traefik-public
         
         # Basic Auth for Dashboard
-        - traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_AUTH}
+        - traefik.http.middlewares.admin-auth.basicauth.users=admin:${TRAEFIK_AUTH?Variable not set}
         
         # HTTPS Redirect Middleware
         - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
