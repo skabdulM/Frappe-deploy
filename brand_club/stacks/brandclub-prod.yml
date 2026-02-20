@@ -41,7 +41,7 @@ services:
       REDIS_QUEUE: redis-queue:6379
       
       # Database Configuration
-      DB_HOST: db
+      DB_HOST: mariadb
       DB_PORT: 3306
       
       # Frappe Configuration
@@ -178,7 +178,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -204,7 +204,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -230,7 +230,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -254,7 +254,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -325,7 +325,7 @@ services:
       PROD_SITE: ${PROD_SITE:-brandclub.com}
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - backups:/backups
@@ -333,12 +333,97 @@ services:
       - brandclub-prod-network
       - brandclub-prod-mariadb
 
+  # ===== Migration Service =====
+  migration:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: none
+      placement:
+        constraints:
+          - node.role == manager
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        bench --site all set-config -p maintenance_mode 1
+        bench --site all set-config -p pause_scheduler 1
+        bench --site all migrate
+        bench --site all set-config -p maintenance_mode 0
+        bench --site all set-config -p pause_scheduler 0
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: mariadb
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-prod-network
+      - brandclub-prod-mariadb
+
+  # ===== Redis Cache Service =====
+  redis-cache:
+    image: redis:6.2-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    command:
+      - redis-server
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redis-cache-data:/data
+    networks:
+      - brandclub-prod-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===== Redis Queue Service =====
+  redis-queue:
+    image: redis:6.2-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-queue-data:/data
+    networks:
+      - brandclub-prod-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
 # ===== Volumes =====
 volumes:
   sites:
     name: brandclub-prod-sites
   logs:
     name: brandclub-prod-logs
+  redis-cache-data:
+    name: brandclub-prod-redis-cache
+  redis-queue-data:
+    name: brandclub-prod-redis-queue
   backups:
     driver: local
     driver_opts:

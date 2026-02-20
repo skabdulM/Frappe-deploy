@@ -3,13 +3,10 @@ version: "3.8"
 # =====================================================
 # DATABASE STACK - PRODUCTION
 # =====================================================
-# Purpose: Isolated MariaDB and Redis for PRODUCTION environment
-# Why separate: Prevents database restart on app redeployment
-# Critical: Never redeploy this stack unless necessary!
+# Only MariaDB - Redis in application stack
 # =====================================================
 
 services:
-  # ===== MariaDB Database =====
   mariadb:
     image: mariadb:10.6
     deploy:
@@ -31,7 +28,6 @@ services:
       - --collation-server=utf8mb4_unicode_ci
       - --skip-character-set-client-handshake
       - --skip-innodb-read-only-compressed
-      # Production Performance tuning
       - --max-connections=500
       - --innodb-buffer-pool-size=1G
       - --innodb-log-file-size=512M
@@ -47,88 +43,19 @@ services:
     volumes:
       - mariadb-data:/var/lib/mysql
     networks:
-      - brandclub-prod-mariadb
+      - mariadb-network
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ===== Redis Cache =====
-  redis-cache:
-    image: redis:6.2-alpine
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 768M
-    command:
-      - redis-server
-      - --maxmemory
-      - 512mb
-      - --maxmemory-policy
-      - allkeys-lru
-      - --save
-      - ""
-    volumes:
-      - redis-cache-data:/data
-    networks:
-      - brandclub-prod-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  # ===== Redis Queue =====
-  redis-queue:
-    image: redis:6.2-alpine
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 768M
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --appendfsync
-      - everysec
-    volumes:
-      - redis-queue-data:/data
-    networks:
-      - brandclub-prod-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-# ===== Volumes =====
 volumes:
   mariadb-data:
-    name: brandclub-prod-db-data
-  redis-cache-data:
-    name: brandclub-prod-redis-cache
-  redis-queue-data:
-    name: brandclub-prod-redis-queue
-
-# ===== Networks =====
-networks:
-  # Database network (external to app stack)
-  brandclub-prod-mariadb:
-    driver: overlay
-    attachable: true
     name: brandclub-prod-mariadb
 
-  # Application network (external to app stack)
-  brandclub-prod-network:
+networks:
+  mariadb-network:
+    name: brandclub-prod-mariadb
     driver: overlay
     attachable: true
-    name: brandclub-prod-network

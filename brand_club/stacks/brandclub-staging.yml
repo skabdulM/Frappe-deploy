@@ -40,7 +40,7 @@ services:
       REDIS_QUEUE: redis-queue:6379
       
       # Database Configuration
-      DB_HOST: db
+      DB_HOST: mariadb
       DB_PORT: 3306
       
       # Frappe Configuration
@@ -158,7 +158,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -184,7 +184,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -210,7 +210,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -231,7 +231,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -239,12 +239,113 @@ services:
       - brandclub-staging-network
       - brandclub-staging-mariadb
 
+  # ===== Migration Service =====
+  migration:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:staging
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: none
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        bench --site all set-config -p maintenance_mode 1
+        bench --site all set-config -p pause_scheduler 1
+        bench --site all migrate
+        bench --site all set-config -p maintenance_mode 0
+        bench --site all set-config -p pause_scheduler 0
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: mariadb
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-staging-network
+      - brandclub-staging-mariadb
+
+  # ===== Redis Cache Service =====
+  redis-cache:
+    image: redis:6.2-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - redis-server
+      - --maxmemory
+      - 384mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redis-cache-data:/data
+    networks:
+      - brandclub-staging-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===== Redis Queue Service =====
+  redis-queue:
+    image: redis:6.2-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-queue-data:/data
+    networks:
+      - brandclub-staging-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  mailpit:
+    image: axllent/mailpit:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=traefik-public
+        - traefik.constraint-label=traefik-public
+        
+        # HTTPS Router for Web UI
+        - traefik.http.routers.brandclub-staging-mailpit.rule=Host(`${MAILPIT_DOMAIN:-mailpit.staging.brandclub.com}`)
+        - traefik.http.routers.brandclub-staging-mailpit.entrypoints=https
+        - traefik.http.routers.brandclub-staging-mailpit.tls=true
+        - traefik.http.routers.brandclub-staging-mailpit.tls.certresolver=le
+        - traefik.http.services.brandclub-staging-mailpit.loadbalancer.server.port=8025
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    networks:
+      - brandclub-staging-network
+      - traefik-public
+
 # ===== Volumes =====
 volumes:
   sites:
     name: brandclub-staging-sites
   logs:
     name: brandclub-staging-logs
+  redis-cache-data:
+    name: brandclub-staging-redis-cache
+  redis-queue-data:
+    name: brandclub-staging-redis-queue
 
 # ===== Networks =====
 networks:

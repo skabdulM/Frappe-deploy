@@ -3,12 +3,10 @@ version: "3.8"
 # =====================================================
 # DATABASE STACK - DEVELOPMENT
 # =====================================================
-# Purpose: Isolated MariaDB and Redis for DEV environment
-# Why separate: Prevents database restart on app redeployment
+# Only MariaDB - Redis in application stack
 # =====================================================
 
 services:
-  # ===== MariaDB Database =====
   mariadb:
     image: mariadb:10.6
     deploy:
@@ -23,7 +21,6 @@ services:
       - --collation-server=utf8mb4_unicode_ci
       - --skip-character-set-client-handshake
       - --skip-innodb-read-only-compressed
-      # Performance tuning for development
       - --max-connections=200
       - --innodb-buffer-pool-size=512M
       - --innodb-log-file-size=128M
@@ -34,80 +31,19 @@ services:
     volumes:
       - mariadb-data:/var/lib/mysql
     networks:
-      - brandclub-dev-mariadb
+      - mariadb-network
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ===== Redis Cache =====
-  redis-cache:
-    image: redis:6.2-alpine
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-    command:
-      - redis-server
-      - --maxmemory
-      - 256mb
-      - --maxmemory-policy
-      - allkeys-lru
-      - --save
-      - ""
-    volumes:
-      - redis-cache-data:/data
-    networks:
-      - brandclub-dev-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  # ===== Redis Queue =====
-  redis-queue:
-    image: redis:6.2-alpine
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --appendfsync
-      - everysec
-    volumes:
-      - redis-queue-data:/data
-    networks:
-      - brandclub-dev-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-# ===== Volumes =====
 volumes:
   mariadb-data:
-    name: brandclub-dev-db-data
-  redis-cache-data:
-    name: brandclub-dev-redis-cache
-  redis-queue-data:
-    name: brandclub-dev-redis-queue
-
-# ===== Networks =====
-networks:
-  # Database network (external to app stack)
-  brandclub-dev-mariadb:
-    driver: overlay
-    attachable: true
     name: brandclub-dev-mariadb
 
-  # Application network (external to app stack)
-  brandclub-dev-network:
+networks:
+  mariadb-network:
+    name: brandclub-dev-mariadb
     driver: overlay
     attachable: true
-    name: brandclub-dev-network

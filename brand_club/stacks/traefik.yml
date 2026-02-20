@@ -21,8 +21,11 @@ services:
         constraints:
           - node.role == manager
       labels:
-        # Dashboard
         - traefik.enable=true
+        - traefik.constraint-label=traefik-public
+        - traefik.docker.network=traefik-public
+        
+        # Dashboard
         - traefik.http.routers.traefik.rule=Host(`${TRAEFIK_DOMAIN:-traefik.example.com}`)
         - traefik.http.routers.traefik.entrypoints=https
         - traefik.http.routers.traefik.tls=true
@@ -52,9 +55,14 @@ services:
       
       # Docker provider
       - --providers.docker=true
-      - --providers.docker.swarmmode=true
       - --providers.docker.exposedbydefault=false
+      - --providers.docker.constraints=Label(`traefik.constraint-label`,`traefik-public`)
       - --providers.docker.network=traefik-public
+      
+      # Swarm provider (replaces deprecated swarmmode)
+      - --providers.swarm=true
+      - --providers.swarm.exposedbydefault=false
+      - --providers.swarm.endpoint=unix:///var/run/docker.sock
       
       # Let's Encrypt
       - --certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL:-admin@example.com}

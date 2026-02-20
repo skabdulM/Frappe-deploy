@@ -136,7 +136,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -158,7 +158,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -180,7 +180,7 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -201,13 +201,85 @@ services:
     environment:
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
-      DB_HOST: db
+      DB_HOST: mariadb
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
     networks:
       - brandclub-dev-network
       - brandclub-dev-mariadb
+
+  # ===== Migration Service =====
+  migration:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: none
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        bench --site all set-config -p maintenance_mode 1
+        bench --site all set-config -p pause_scheduler 1
+        bench --site all migrate
+        bench --site all set-config -p maintenance_mode 0
+        bench --site all set-config -p pause_scheduler 0
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: mariadb
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-dev-network
+      - brandclub-dev-mariadb
+
+  # ===== Redis Cache Service =====
+  redis-cache:
+    image: redis:6.2-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redis-cache-data:/data
+    networks:
+      - brandclub-dev-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===== Redis Queue Service =====
+  redis-queue:
+    image: redis:6.2-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-queue-data:/data
+    networks:
+      - brandclub-dev-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   # ===== Mailpit (Development Email Testing) =====
   # NOTE: MariaDB and Redis are deployed in separate 'database-dev' stack
@@ -243,6 +315,10 @@ volumes:
     name: brandclub-dev-sites
   logs:
     name: brandclub-dev-logs
+  redis-cache-data:
+    name: brandclub-dev-redis-cache
+  redis-queue-data:
+    name: brandclub-dev-redis-queue
   # NOTE: Database volumes are managed by database-dev stack
 
 # ===== Networks =====
