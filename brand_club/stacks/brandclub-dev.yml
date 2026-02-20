@@ -1,0 +1,263 @@
+version: "3.8"
+
+# =====================================================
+# BRAND CLUB - DEVELOPMENT STACK
+# =====================================================
+# Branch: develop
+# Stack: brandclub-dev
+# Image: brand_club:develop
+# Purpose: Active development and testing
+# =====================================================
+
+services:
+  # ===== Backend Service (Gunicorn) =====
+  backend:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+    environment:
+      # Redis Configuration
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      
+      # Database Configuration
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      
+      # Frappe Configuration
+      FRAPPE_SITE_NAME_HEADER: $$host
+      SOCKETIO_PORT: 9000
+      
+      # Development Settings
+      DEVELOPER_MODE: 1
+      FRAPPE_LOGGING_LEVEL: DEBUG
+      
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-dev-network
+      - brandclub-dev-mariadb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ===== Frontend Service (Nginx) =====
+  frontend:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      labels:
+        # Traefik Configuration
+        - traefik.enable=true
+        - traefik.docker.network=traefik-public
+        - traefik.constraint-label=traefik-public
+        
+        # HTTP Router (redirect to HTTPS)
+        - traefik.http.routers.brandclub-dev-http.rule=Host(`${DEV_DOMAIN:-dev.brandclub.com}`)
+        - traefik.http.routers.brandclub-dev-http.entrypoints=http
+        - traefik.http.routers.brandclub-dev-http.middlewares=https-redirect
+        
+        # HTTPS Router
+        - traefik.http.routers.brandclub-dev-https.rule=Host(`${DEV_DOMAIN:-dev.brandclub.com}`)
+        - traefik.http.routers.brandclub-dev-https.entrypoints=https
+        - traefik.http.routers.brandclub-dev-https.tls=true
+        - traefik.http.routers.brandclub-dev-https.tls.certresolver=le
+        
+        # Service definition
+        - traefik.http.services.brandclub-dev.loadbalancer.server.port=8080
+        
+        # Middleware for HTTPS redirect
+        - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
+        - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: $$host
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-dev-network
+      - traefik-public
+    depends_on:
+      - backend
+      - websocket
+
+  # ===== WebSocket Service =====
+  websocket:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    environment:
+      REDIS_QUEUE: redis-queue:6379
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-dev-network
+
+  # ===== Queue Workers =====
+  queue-default:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - bench
+      - worker
+      - --queue
+      - default
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-dev-network
+      - brandclub-dev-mariadb
+
+  queue-short:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - bench
+      - worker
+      - --queue
+      - short
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-dev-network
+      - brandclub-dev-mariadb
+
+  queue-long:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - bench
+      - worker
+      - --queue
+      - long
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-dev-network
+      - brandclub-dev-mariadb
+
+  # ===== Scheduler Service =====
+  scheduler:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:develop
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - bench
+      - schedule
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-dev-network
+      - brandclub-dev-mariadb
+
+  # ===== Mailpit (Development Email Testing) =====
+  # NOTE: MariaDB and Redis are deployed in separate 'database-dev' stack
+  # This prevents database restarts when redeploying the application
+  mailpit:
+    image: axllent/mailpit:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=traefik-public
+        - traefik.constraint-label=traefik-public
+        
+        # HTTPS Router for Web UI
+        - traefik.http.routers.brandclub-dev-mailpit.rule=Host(`${MAILPIT_DOMAIN:-mailpit.dev.brandclub.com}`)
+        - traefik.http.routers.brandclub-dev-mailpit.entrypoints=https
+        - traefik.http.routers.brandclub-dev-mailpit.tls=true
+        - traefik.http.routers.brandclub-dev-mailpit.tls.certresolver=le
+        - traefik.http.services.brandclub-dev-mailpit.loadbalancer.server.port=8025
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    networks:
+      - brandclub-dev-network
+      - traefik-public
+
+# ===== Volumes =====
+volumes:
+  sites:
+    name: brandclub-dev-sites
+  logs:
+    name: brandclub-dev-logs
+  # NOTE: Database volumes are managed by database-dev stack
+
+# ===== Networks =====
+networks:
+  # Internal network for Frappe services (created by database-dev stack)
+  brandclub-dev-network:
+    external: true
+    name: brandclub-dev-network
+
+  # Isolated database network (created by database-dev stack)
+  brandclub-dev-mariadb:
+    external: true
+    name: brandclub-dev-mariadb
+
+  # Shared Traefik network (must be created externally)
+  traefik-public:
+    external: true
+    name: traefik-public

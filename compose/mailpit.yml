@@ -1,0 +1,28 @@
+version: "3.7"
+
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    deploy:
+      restart_policy:
+        condition: on-failure
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=traefik-public
+        - traefik.constraint-label=traefik-public
+        - traefik.http.routers.${BENCH_NAME:-erpnext}-mailpit.rule=Host(`${MAILPIT_HOST:?MAILPIT_HOST not set}`)
+        - traefik.http.routers.${BENCH_NAME:-erpnext}-mailpit.entrypoints=https
+        - traefik.http.routers.${BENCH_NAME:-erpnext}-mailpit.tls=true
+        - traefik.http.routers.${BENCH_NAME:-erpnext}-mailpit.tls.certresolver=le
+        - traefik.http.services.${BENCH_NAME:-erpnext}-mailpit.loadbalancer.server.port=8025
+    networks:
+      - bench-network
+      - traefik-public
+
+networks:
+  bench-network:
+    name: ${BENCH_NAME:-erpnext}
+    external: true
+  traefik-public:
+    name: traefik-public
+    external: true

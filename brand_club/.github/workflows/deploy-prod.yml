@@ -1,0 +1,190 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm production deployment'
+        required: true
+        default: ''
+
+env:
+  IMAGE_NAME: brand_club
+  ENVIRONMENT: production
+
+jobs:
+  # Safety check for manual deployments
+  verify-deployment:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
+            echo "ERROR: Deployment not confirmed. Please type 'deploy' to proceed."
+            exit 1
+          fi
+          echo "Deployment confirmed. Proceeding..."
+
+  build-and-deploy:
+    name: Build & Deploy to PRODUCTION
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [verify-deployment]
+    if: always() && (needs.verify-deployment.result == 'success' || github.event_name == 'push')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY_URL }}
+          username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          echo "COMMIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          # Use semantic version if tagged, otherwise use 'main'
+          if git describe --tags --exact-match 2>/dev/null; then
+            VERSION=$(git describe --tags --exact-match)
+          else
+            VERSION="main"
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Prepare apps.json
+        run: |
+          # Use production-specific apps configuration
+          if [ -f "ci/apps-production.json" ]; then
+            cp ci/apps-production.json ci/apps.json
+          elif [ -f "ci/apps.json" ]; then
+            echo "Using default apps.json"
+          else
+            echo "ERROR: No apps.json found!"
+            exit 1
+          fi
+          
+          # Display apps that will be installed
+          echo "Apps to be installed:"
+          cat ci/apps.json
+
+      - name: Encode apps.json to base64
+        id: encode
+        run: |
+          APPS_JSON_BASE64=$(base64 -w 0 < ci/apps.json)
+          echo "APPS_JSON_BASE64=${APPS_JSON_BASE64}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:main
+            ${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.VERSION }}
+            ${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=${{ secrets.FRAPPE_VERSION }}
+            PYTHON_VERSION=${{ secrets.PYTHON_VERSION }}
+            NODE_VERSION=${{ secrets.NODE_VERSION }}
+            APPS_JSON_BASE64=${{ steps.encode.outputs.APPS_JSON_BASE64 }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:main
+          cache-to: type=inline
+          labels: |
+            org.opencontainers.image.title=Brand Club PRODUCTION
+            org.opencontainers.image.description=Brand Club Frappe App - Production
+            org.opencontainers.image.version=${{ steps.meta.outputs.VERSION }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.BUILD_DATE }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+
+      - name: Create deployment artifact
+        if: success()
+        run: |
+          mkdir -p deployment-artifacts
+          echo "Deployment Information" > deployment-artifacts/deployment-info.txt
+          echo "=====================" >> deployment-artifacts/deployment-info.txt
+          echo "Environment: Production" >> deployment-artifacts/deployment-info.txt
+          echo "Version: ${{ steps.meta.outputs.VERSION }}" >> deployment-artifacts/deployment-info.txt
+          echo "Commit: ${{ github.sha }}" >> deployment-artifacts/deployment-info.txt
+          echo "Build Date: ${{ steps.meta.outputs.BUILD_DATE }}" >> deployment-artifacts/deployment-info.txt
+          echo "Deployed By: ${{ github.actor }}" >> deployment-artifacts/deployment-info.txt
+
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-info-${{ steps.meta.outputs.COMMIT_SHA }}
+          path: deployment-artifacts/
+
+      - name: Trigger Portainer Webhook
+        if: success()
+        run: |
+          echo "Triggering Portainer webhook for brandclub-prod stack..."
+          curl -X POST "${{ secrets.PORTAINER_WEBHOOK_PROD }}" || {
+            echo "ERROR: Portainer webhook failed!"
+            echo "Please manually update the production stack in Portainer."
+            exit 1
+          }
+          echo "Deployment triggered successfully!"
+          echo "Waiting 10 seconds for stack to begin updating..."
+          sleep 10
+
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "### :rocket: Production Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Production" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** main" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.meta.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ steps.meta.outputs.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:main" >> $GITHUB_STEP_SUMMARY
+          echo "**Stack:** brandclub-prod" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployed By:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### :clipboard: Post-Deployment Checklist" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Verify site accessibility" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Check application logs" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Test critical user flows" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Monitor error rates" >> $GITHUB_STEP_SUMMARY
+          echo "- [ ] Verify backup service is running" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Note:** The production stack will update with zero downtime. Monitor the deployment closely." >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "### :x: Production Deployment Failed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Production" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** main" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ steps.meta.outputs.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Attempted By:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Action Required:** Please investigate the failure and attempt manual deployment if needed." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Rollback Instructions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'docker service rollback brandclub-prod_backend' >> $GITHUB_STEP_SUMMARY
+          echo 'docker service rollback brandclub-prod_frontend' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

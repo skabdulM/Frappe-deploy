@@ -1,0 +1,91 @@
+version: "3.8"
+
+# =====================================================
+# Traefik - Reverse Proxy & SSL Termination
+# =====================================================
+# Features:
+# - Automatic SSL with Let's Encrypt
+# - HTTP to HTTPS redirect
+# - Dashboard with basic auth
+# - Request body size limits
+# =====================================================
+
+services:
+  traefik:
+    image: traefik:v3.0
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        # Dashboard
+        - traefik.enable=true
+        - traefik.http.routers.traefik.rule=Host(`${TRAEFIK_DOMAIN:-traefik.example.com}`)
+        - traefik.http.routers.traefik.entrypoints=https
+        - traefik.http.routers.traefik.tls=true
+        - traefik.http.routers.traefik.tls.certresolver=le
+        - traefik.http.routers.traefik.service=api@internal
+        - traefik.http.routers.traefik.middlewares=traefik-auth
+        - traefik.http.services.traefik.loadbalancer.server.port=8080
+        
+        # Basic Auth Middleware
+        - traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_AUTH}
+        
+        # HTTPS Redirect Middleware
+        - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
+        - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
+        
+        # Body Size Limit Middleware (for large file uploads)
+        - traefik.http.middlewares.body-size-limit.buffering.maxRequestBodyBytes=104857600
+        - traefik.http.middlewares.body-size-limit.buffering.memRequestBodyBytes=104857600
+    command:
+      # API and Dashboard
+      - --api.dashboard=true
+      - --api.insecure=false
+      
+      # Entry Points
+      - --entrypoints.http.address=:80
+      - --entrypoints.https.address=:443
+      
+      # Docker provider
+      - --providers.docker=true
+      - --providers.docker.swarmmode=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=traefik-public
+      
+      # Let's Encrypt
+      - --certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL:-admin@example.com}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=http
+      
+      # Logging
+      - --log.level=INFO
+      - --accesslog=true
+      
+      # Metrics (optional)
+      - --metrics.prometheus=true
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+      - target: 443
+        published: 443
+        mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certificates:/letsencrypt
+    networks:
+      - traefik-public
+
+volumes:
+  traefik-certificates:
+    name: traefik-certificates
+
+networks:
+  traefik-public:
+    external: true
+    name: traefik-public

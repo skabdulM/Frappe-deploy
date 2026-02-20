@@ -1,0 +1,269 @@
+version: "3.8"
+
+# =====================================================
+# BRAND CLUB - STAGING STACK
+# =====================================================
+# Branch: staging
+# Stack: brandclub-staging
+# Image: brand_club:staging
+# Purpose: Pre-production testing and QA
+# =====================================================
+
+services:
+  # ===== Backend Service (Gunicorn) =====
+  backend:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:staging
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1.5G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    environment:
+      # Redis Configuration
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      
+      # Database Configuration
+      DB_HOST: db
+      DB_PORT: 3306
+      
+      # Frappe Configuration
+      FRAPPE_SITE_NAME_HEADER: $$host
+      SOCKETIO_PORT: 9000
+      
+      # Staging Settings
+      FRAPPE_LOGGING_LEVEL: INFO
+      
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-staging-network
+      - brandclub-staging-mariadb
+      - shared-services
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ===== Frontend Service (Nginx) =====
+  frontend:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:staging
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      update_config:
+        order: start-first
+      labels:
+        # Traefik Configuration
+        - traefik.enable=true
+        - traefik.docker.network=traefik-public
+        - traefik.constraint-label=traefik-public
+        
+        # HTTP Router (redirect to HTTPS)
+        - traefik.http.routers.brandclub-staging-http.rule=Host(`${STAGING_DOMAIN:-staging.brandclub.com}`)
+        - traefik.http.routers.brandclub-staging-http.entrypoints=http
+        - traefik.http.routers.brandclub-staging-http.middlewares=https-redirect
+        
+        # HTTPS Router
+        - traefik.http.routers.brandclub-staging-https.rule=Host(`${STAGING_DOMAIN:-staging.brandclub.com}`)
+        - traefik.http.routers.brandclub-staging-https.entrypoints=https
+        - traefik.http.routers.brandclub-staging-https.tls=true
+        - traefik.http.routers.brandclub-staging-https.tls.certresolver=le
+        
+        # Service definition
+        - traefik.http.services.brandclub-staging.loadbalancer.server.port=8080
+        
+        # Security headers
+        - traefik.http.middlewares.staging-security.headers.customResponseHeaders.X-Robots-Tag=noindex,nofollow
+        - traefik.http.middlewares.staging-security.headers.stsSeconds=31536000
+        - traefik.http.middlewares.staging-security.headers.stsIncludeSubdomains=true
+        - traefik.http.routers.brandclub-staging-https.middlewares=staging-security
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: $$host
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-staging-network
+      - traefik-public
+    depends_on:
+      - backend
+      - websocket
+
+  # ===== WebSocket Service =====
+  websocket:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:staging
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    environment:
+      REDIS_QUEUE: redis-queue:6379
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-staging-network
+
+  # ===== Queue Workers =====
+  queue-default:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:staging
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    command:
+      - bench
+      - worker
+      - --queue
+      - default
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-staging-network
+      - brandclub-staging-mariadb
+
+  queue-short:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:staging
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    command:
+      - bench
+      - worker
+      - --queue
+      - short
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-staging-network
+      - brandclub-staging-mariadb
+
+  queue-long:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:staging
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    command:
+      - bench
+      - worker
+      - --queue
+      - long
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-staging-network
+      - brandclub-staging-mariadb
+
+  # ===== Scheduler Service =====
+  scheduler:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:staging
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - bench
+      - schedule
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-staging-network
+      - brandclub-staging-mariadb
+
+# ===== Volumes =====
+volumes:
+  sites:
+    name: brandclub-staging-sites
+  logs:
+    name: brandclub-staging-logs
+
+# ===== Networks =====
+networks:
+  # Internal network for Frappe services (created by database stack)
+  brandclub-staging-network:
+    external: true
+    name: brandclub-staging-network
+
+  # Isolated database network (created by database stack)
+  brandclub-staging-mariadb:
+    external: true
+    name: brandclub-staging-mariadb
+
+  # Shared Traefik network (must be created externally)
+  traefik-public:
+    external: true
+    name: traefik-public
+
+  # Shared services network (for future mail relay, etc.)
+  shared-services:
+    external: true
+    name: shared-services

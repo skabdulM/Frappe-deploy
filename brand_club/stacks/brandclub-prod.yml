@@ -1,0 +1,370 @@
+version: "3.8"
+
+# =====================================================
+# BRAND CLUB - PRODUCTION STACK
+# =====================================================
+# Branch: main
+# Stack: brandclub-prod
+# Image: brand_club:main
+# Purpose: Live production environment
+# Features: High availability, daily backups, monitoring
+# =====================================================
+
+services:
+  # ===== Backend Service (Gunicorn) =====
+  backend:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 20s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    environment:
+      # Redis Configuration
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      
+      # Database Configuration
+      DB_HOST: db
+      DB_PORT: 3306
+      
+      # Frappe Configuration
+      FRAPPE_SITE_NAME_HEADER: $$host
+      SOCKETIO_PORT: 9000
+      
+      # Production Settings
+      FRAPPE_LOGGING_LEVEL: WARNING
+      GUNICORN_WORKERS: 4
+      GUNICORN_TIMEOUT: 120
+      
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-prod-network
+      - brandclub-prod-mariadb
+      - shared-services
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  # ===== Frontend Service (Nginx) =====
+  frontend:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      update_config:
+        order: start-first
+        delay: 10s
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+      labels:
+        # Traefik Configuration
+        - traefik.enable=true
+        - traefik.docker.network=traefik-public
+        - traefik.constraint-label=traefik-public
+        
+        # HTTP Router (redirect to HTTPS)
+        - traefik.http.routers.brandclub-prod-http.rule=Host(`${PROD_DOMAIN:-brandclub.com}`)
+        - traefik.http.routers.brandclub-prod-http.entrypoints=http
+        - traefik.http.routers.brandclub-prod-http.middlewares=https-redirect
+        
+        # HTTPS Router
+        - traefik.http.routers.brandclub-prod-https.rule=Host(`${PROD_DOMAIN:-brandclub.com}`)
+        - traefik.http.routers.brandclub-prod-https.entrypoints=https
+        - traefik.http.routers.brandclub-prod-https.tls=true
+        - traefik.http.routers.brandclub-prod-https.tls.certresolver=le
+        
+        # Service definition
+        - traefik.http.services.brandclub-prod.loadbalancer.server.port=8080
+        - traefik.http.services.brandclub-prod.loadbalancer.sticky.cookie=true
+        - traefik.http.services.brandclub-prod.loadbalancer.sticky.cookie.name=brandclub_lb
+        
+        # Security headers
+        - traefik.http.middlewares.prod-security.headers.stsSeconds=31536000
+        - traefik.http.middlewares.prod-security.headers.stsIncludeSubdomains=true
+        - traefik.http.middlewares.prod-security.headers.stsPreload=true
+        - traefik.http.middlewares.prod-security.headers.frameDeny=true
+        - traefik.http.middlewares.prod-security.headers.contentTypeNosniff=true
+        - traefik.http.middlewares.prod-security.headers.browserXssFilter=true
+        - traefik.http.routers.brandclub-prod-https.middlewares=prod-security
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: $$host
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-100m}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-prod-network
+      - traefik-public
+    depends_on:
+      - backend
+      - websocket
+
+  # ===== WebSocket Service =====
+  websocket:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    environment:
+      REDIS_QUEUE: redis-queue:6379
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-prod-network
+
+  # ===== Queue Workers =====
+  queue-default:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1.5G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    command:
+      - bench
+      - worker
+      - --queue
+      - default
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-prod-network
+      - brandclub-prod-mariadb
+
+  queue-short:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    command:
+      - bench
+      - worker
+      - --queue
+      - short
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-prod-network
+      - brandclub-prod-mariadb
+
+  queue-long:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1.5G
+    command:
+      - bench
+      - worker
+      - --queue
+      - long
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-prod-network
+      - brandclub-prod-mariadb
+
+  # ===== Scheduler Service =====
+  scheduler:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    command:
+      - bench
+      - schedule
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - brandclub-prod-network
+      - brandclub-prod-mariadb
+
+  # ===== Backup Service (Daily at 2 AM UTC) =====
+  backup:
+    image: ${DOCKER_REGISTRY:-ghcr.io}/${DOCKER_ORG:-your-org}/brand_club:main
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Brand Club Backup Service Started ==="
+        echo "Backup will run daily at 2 AM UTC"
+        echo "Retention: 7 days"
+        
+        while true; do
+          # Calculate seconds until 2 AM UTC
+          current_epoch=$(date +%s)
+          target_epoch=$(date -d "tomorrow 02:00:00 UTC" +%s)
+          sleep_seconds=$((target_epoch - current_epoch))
+          
+          # If it's already past 2 AM today, sleep until tomorrow 2 AM
+          if [ $$sleep_seconds -lt 0 ]; then
+            target_epoch=$(date -d "02:00:00 UTC" +%s)
+            sleep_seconds=$((target_epoch - current_epoch))
+          fi
+          
+          echo "Next backup scheduled in $$sleep_seconds seconds ($(date -d @$$target_epoch))"
+          sleep $$sleep_seconds
+          
+          echo "=== Starting backup at $(date) ==="
+          
+          # Create dated backup directory
+          BACKUP_DATE=$(date +%Y-%m-%d)
+          BACKUP_PATH="/backups/${PROD_SITE:-brandclub.com}/$$BACKUP_DATE"
+          mkdir -p "$$BACKUP_PATH"
+          
+          # Run bench backup for the site
+          cd /home/frappe/frappe-bench
+          bench --site ${PROD_SITE:-brandclub.com} backup --with-files --backup-path "$$BACKUP_PATH" || {
+            echo "ERROR: Backup failed at $(date)" >&2
+            continue
+          }
+          
+          echo "Backup completed successfully at $(date)"
+          echo "Backup location: $$BACKUP_PATH"
+          
+          # Cleanup old backups (older than 7 days)
+          echo "Cleaning up backups older than 7 days..."
+          find /backups/${PROD_SITE:-brandclub.com}/ -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \; 2>/dev/null || true
+          
+          echo "Current backups:"
+          ls -lh /backups/${PROD_SITE:-brandclub.com}/ || true
+          
+          echo "=== Backup cycle complete. Sleeping until next scheduled time ==="
+        done
+    environment:
+      PROD_SITE: ${PROD_SITE:-brandclub.com}
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: db
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - backups:/backups
+    networks:
+      - brandclub-prod-network
+      - brandclub-prod-mariadb
+
+# ===== Volumes =====
+volumes:
+  sites:
+    name: brandclub-prod-sites
+  logs:
+    name: brandclub-prod-logs
+  backups:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${BACKUP_DIR:-/backups}
+    name: brandclub-prod-backups
+
+# ===== Networks =====
+networks:
+  # Internal network for Frappe services (created by database stack)
+  brandclub-prod-network:
+    external: true
+    name: brandclub-prod-network
+
+  # Isolated database network (created by database stack)
+  brandclub-prod-mariadb:
+    external: true
+    name: brandclub-prod-mariadb
+
+  # Shared Traefik network (must be created externally)
+  traefik-public:
+    external: true
+    name: traefik-public
+
+  # Shared services network (for future mail relay, etc.)
+  shared-services:
+    external: true
+    name: shared-services

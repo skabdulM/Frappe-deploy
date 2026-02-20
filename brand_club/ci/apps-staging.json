@@ -1,0 +1,14 @@
+[
+  {
+    "url": "https://github.com/frappe/insights",
+    "branch": "v3.2.31"
+  },
+  {
+    "url": "https://github.com/frappe/drive",
+    "branch": "v0.3.0"
+  },
+  {
+    "url": "https://github.com/brandclub/brand-club-erp",
+    "branch": "staging"
+  }
+]

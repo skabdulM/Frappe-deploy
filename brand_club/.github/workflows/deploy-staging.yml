@@ -1,0 +1,123 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: brand_club
+  ENVIRONMENT: staging
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy to STAGING
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY_URL }}
+          username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          echo "COMMIT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "VERSION=staging" >> $GITHUB_OUTPUT
+
+      - name: Prepare apps.json
+        run: |
+          # Use staging-specific apps configuration
+          if [ -f "ci/apps-staging.json" ]; then
+            cp ci/apps-staging.json ci/apps.json
+          elif [ -f "ci/apps.json" ]; then
+            echo "Using default apps.json"
+          else
+            echo "ERROR: No apps.json found!"
+            exit 1
+          fi
+          
+          # Display apps that will be installed
+          echo "Apps to be installed:"
+          cat ci/apps.json
+
+      - name: Encode apps.json to base64
+        id: encode
+        run: |
+          APPS_JSON_BASE64=$(base64 -w 0 < ci/apps.json)
+          echo "APPS_JSON_BASE64=${APPS_JSON_BASE64}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:staging
+            ${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:staging-${{ steps.meta.outputs.COMMIT_SHA }}
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=${{ secrets.FRAPPE_VERSION }}
+            PYTHON_VERSION=${{ secrets.PYTHON_VERSION }}
+            NODE_VERSION=${{ secrets.NODE_VERSION }}
+            APPS_JSON_BASE64=${{ steps.encode.outputs.APPS_JSON_BASE64 }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:staging
+          cache-to: type=inline
+          labels: |
+            org.opencontainers.image.title=Brand Club STAGING
+            org.opencontainers.image.description=Brand Club Frappe App - Staging
+            org.opencontainers.image.version=staging
+            org.opencontainers.image.created=${{ steps.meta.outputs.BUILD_DATE }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+
+      - name: Trigger Portainer Webhook
+        if: success()
+        run: |
+          echo "Triggering Portainer webhook for brandclub-staging stack..."
+          curl -X POST "${{ secrets.PORTAINER_WEBHOOK_STAGING }}" || {
+            echo "WARNING: Portainer webhook failed. Stack may need manual update."
+            exit 0
+          }
+          echo "Deployment triggered successfully!"
+
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "### :rocket: Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Staging" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** staging" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ steps.meta.outputs.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:staging" >> $GITHUB_STEP_SUMMARY
+          echo "**Stack:** brandclub-staging" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The staging stack should update automatically within 1-2 minutes." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Note:** Please verify the deployment before promoting to production." >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "### :x: Deployment Failed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Staging" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** staging" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ steps.meta.outputs.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please check the logs for details." >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,30 @@
+[
+  {
+    "url": "https://github.com/frappe/erpnext",
+    "branch": "v15.91.3"
+  },
+  {
+    "url": "https://github.com/frappe/hrms",
+    "branch": "v15.53.0"
+  },
+  {
+    "url": "https://github.com/ERPGulf/Oman_VAT",
+    "branch": "main"
+  },
+  {
+    "url": "https://github.com/The-Commit-Company/commit",
+    "branch": "v2.00"
+  },
+  {
+    "url": "https://github.com/frappe/insights",
+    "branch": "v3.2.18"
+  },
+  {
+    "url": "https://github.com/Cecypo-Tech/frappe_customer_statements",
+    "branch": "develop"
+  },
+  {
+    "url": "https://ci-token:${NMS_KEY}@gitlab.com/c2k1/nms-erp",
+    "branch": "v2.6.1"
+  }
+]

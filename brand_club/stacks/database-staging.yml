@@ -1,0 +1,120 @@
+version: "3.8"
+
+# =====================================================
+# DATABASE STACK - STAGING
+# =====================================================
+# Purpose: Isolated MariaDB and Redis for STAGING environment
+# Why separate: Prevents database restart on app redeployment
+# =====================================================
+
+services:
+  # ===== MariaDB Database =====
+  mariadb:
+    image: mariadb:10.6
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1.5G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+      # Performance tuning
+      - --max-connections=250
+      - --innodb-buffer-pool-size=768M
+      - --innodb-log-file-size=256M
+      - --query-cache-size=0
+      - --query-cache-type=0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    networks:
+      - brandclub-staging-mariadb
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== Redis Cache =====
+  redis-cache:
+    image: redis:6.2-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - redis-server
+      - --maxmemory
+      - 384mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+    volumes:
+      - redis-cache-data:/data
+    networks:
+      - brandclub-staging-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===== Redis Queue =====
+  redis-queue:
+    image: redis:6.2-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-queue-data:/data
+    networks:
+      - brandclub-staging-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+# ===== Volumes =====
+volumes:
+  mariadb-data:
+    name: brandclub-staging-db-data
+  redis-cache-data:
+    name: brandclub-staging-redis-cache
+  redis-queue-data:
+    name: brandclub-staging-redis-queue
+
+# ===== Networks =====
+networks:
+  # Database network (external to app stack)
+  brandclub-staging-mariadb:
+    driver: overlay
+    attachable: true
+    name: brandclub-staging-mariadb
+
+  # Application network (external to app stack)
+  brandclub-staging-network:
+    driver: overlay
+    attachable: true
+    name: brandclub-staging-network
