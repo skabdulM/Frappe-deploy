@@ -212,66 +212,69 @@ services:
       - brandclub-prod-network
       - brandclub-prod-mariadb
 
-  # ===== Backup Service (Daily at 2 AM UTC) =====
+  # ===== Backup Service (Scheduled via Ofelia) =====
   backup:
     image: ghcr.io/brandclub/brand-club-erp:${TAG_NAME:-main}
     deploy:
+      mode: replicated
+      replicas: 0
       restart_policy:
-        condition: on-failure
+        condition: none
       placement:
         constraints:
           - node.role == manager
+      labels:
+        ofelia.enabled: "true"
+        ofelia.job-run.brandclub-backup.schedule: "* * * * *"
+        ofelia.job-run.brandclub-backup.container: "brandclub-main_backup"
+        ofelia.job-run.brandclub-backup.no-overlap: "true"
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         set -e
         echo "=== Brand Club Backup Service Started ==="
-        echo "Backup will run daily at 2 AM UTC"
-        echo "Retention: 7 days"
         
-        while true; do
-          # Calculate seconds until 2 AM UTC
-          current_epoch=$(date +%s)
-          target_epoch=$(date -d "tomorrow 02:00:00 UTC" +%s)
-          sleep_seconds=$((target_epoch - current_epoch))
-          
-          # If it's already past 2 AM today, sleep until tomorrow 2 AM
-          if [ $$sleep_seconds -lt 0 ]; then
-            target_epoch=$(date -d "02:00:00 UTC" +%s)
-            sleep_seconds=$((target_epoch - current_epoch))
+        PROD_SITE="${PROD_DOMAIN:-erp.brandclub.site}"
+        BACKUP_DIR="/backups/$${PROD_SITE}"
+        mkdir -p "$${BACKUP_DIR}"
+        
+        echo "Starting backup at $$(date)"
+        
+        # Run bench backup for the site
+        cd /home/frappe/frappe-bench
+        bench --site $${PROD_SITE} backup --with-files || {
+          echo "ERROR: Backup failed at $$(date)" >&2
+          exit 1
+        }
+        
+        # Copy Frappe's backup files to /backups mount
+        FRAPPE_BACKUP_DIR="/home/frappe/frappe-bench/sites/$${PROD_SITE}/private/backups"
+        if [ -d "$${FRAPPE_BACKUP_DIR}" ]; then
+          LATEST_BACKUP=$$(ls -t "$${FRAPPE_BACKUP_DIR}" | grep database | head -1)
+          if [ ! -z "$${LATEST_BACKUP}" ]; then
+            TIMESTAMP=$${LATEST_BACKUP%-database*}
+            echo "Copying backup ($${TIMESTAMP}) to $${BACKUP_DIR}..."
+            mkdir -p "$${BACKUP_DIR}"
+            cp "$${FRAPPE_BACKUP_DIR}"/$${TIMESTAMP}-* "$${BACKUP_DIR}/" 2>/dev/null || true
           fi
-          
-          echo "Next backup scheduled in $$sleep_seconds seconds ($(date -d @$$target_epoch))"
-          sleep $$sleep_seconds
-          
-          echo "=== Starting backup at $(date) ==="
-          
-          # Create dated backup directory
-          BACKUP_DATE=$(date +%Y-%m-%d)
-          BACKUP_PATH="/backups/${PROD_SITE:-brandclub.com}/$$BACKUP_DATE"
-          mkdir -p "$$BACKUP_PATH"
-          
-          # Run bench backup for the site
-          cd /home/frappe/frappe-bench
-          bench --site ${PROD_SITE:-brandclub.com} backup --with-files --backup-path "$$BACKUP_PATH" || {
-            echo "ERROR: Backup failed at $(date)" >&2
-            continue
-          }
-          
-          echo "Backup completed successfully at $(date)"
-          echo "Backup location: $$BACKUP_PATH"
-          
-          # Cleanup old backups (older than 7 days)
-          echo "Cleaning up backups older than 7 days..."
-          find /backups/${PROD_SITE:-brandclub.com}/ -maxdepth 1 -type d -mtime +7 -exec rm -rf {} \; 2>/dev/null || true
-          
-          echo "Current backups:"
-          ls -lh /backups/${PROD_SITE:-brandclub.com}/ || true
-          
-          echo "=== Backup cycle complete. Sleeping until next scheduled time ==="
-        done
+        fi
+        
+        # Cleanup - keep only last 7 backups
+        echo "Cleaning up old backups (keeping last 7)..."
+        cd "$${BACKUP_DIR}" 2>/dev/null || exit 0
+        ls -t *-database* 2>/dev/null | tail -n +8 | while read old_db; do
+          BACKUP_PREFIX=$${old_db%-database*}
+          echo "Removing old backup: $${BACKUP_PREFIX}"
+          rm -f $${BACKUP_PREFIX}-* || true
+        done || true
+        
+        echo "Current backups:"
+        ls -lh "$${BACKUP_DIR}" | grep -E "database|config" | tail -10 || echo "No backups found"
+        
+        echo "=== Backup completed successfully at $$(date) ==="
+        exit 0
     environment:
-      PROD_SITE: ${PROD_SITE:-brandclub.com}
+      PROD_SITE: ${PROD_SITE:-erp.brandclub.site}
       REDIS_CACHE: redis-cache:6379
       REDIS_QUEUE: redis-queue:6379
       DB_HOST: mariadb

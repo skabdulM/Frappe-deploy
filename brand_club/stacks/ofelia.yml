@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  ofelia:
+    image: mcuadros/ofelia:latest
+    command: daemon --docker
+    user: "root"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ofelia-logs:/var/log/ofelia
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 10
+        window: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ofelia-logs:
+    name: ofelia-logs
