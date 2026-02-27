@@ -546,23 +546,20 @@ def collect_environments() -> tuple:
                 used_names.add(name)
                 break
 
-        # ── Site domain — must be unique ───────────────────────────────────────
+        # ── Domain / site name — must be unique ───────────────────────────────
+        # In Frappe, the site name IS the domain — bench uses it as the site folder
+        # name and it must match the HTTP Host header the browser sends.
         while True:
             domain_default = f"erp-{name}.example.com"
-            domain = ask("  Routing domain (Traefik Host rule)", domain_default)
+            domain = ask("  Domain / site name  (e.g. erp.mycompany.com)", domain_default)
             if domain in used_domains:
                 print(f"  {RED}Domain '{domain}' is already assigned to another environment.{RESET}")
             else:
                 used_domains.add(domain)
                 break
 
-        # ── Frappe site name — defaults to domain, must match HTTP Host header ──
-        print(f"  {DIM}  Site name is what bench uses as the site folder name.{RESET}")
-        print(f"  {DIM}  It must match the domain above (browsers send it as the Host header).{RESET}")
-        site_name = ask("  Frappe site name", domain)
-        if site_name != domain:
-            warn(f"  Site name '{site_name}' differs from domain '{domain}'.")
-            warn(f"  Make sure FRAPPE_SITE_NAME_HEADER in your image config handles this.")
+        # site_name always equals domain — no separate prompt needed
+        site_name = domain
 
         # ── Frappe site admin password ─────────────────────────────────────────
         print(f"\n  {BOLD}Frappe site admin password{RESET}  (for logging in to the ERP at {domain})")
@@ -608,8 +605,7 @@ def collect_environments() -> tuple:
             has_backup=has_backup,
             backup_dir=backup_dir,
         ))
-        site_label = f" site={site_name}" if site_name != domain else ""
-        ok(f"'{name}' → {domain}{site_label}"
+        ok(f"'{name}' → {domain}"
            + (f" + mailpit @ {mailpit_domain}" if has_mailpit else "")
            + (" + backup" if has_backup else ""))
 
@@ -1278,93 +1274,84 @@ def get_backend_container(stack_name: str) -> str:
     return cid
 
 
-# ─── Portainer password via API ────────────────────────────────────────────────
+# ─── Portainer password via helper image ──────────────────────────────────────
 
 def set_portainer_admin_password(domain: str, password: str):
     """
-    Set Portainer admin password by calling the init API from INSIDE the container.
+    Set Portainer admin password using the official portainer/helper-reset-password image.
 
-    Why inside the container:
-      - Calling via https://domain requires DNS to resolve + Let's Encrypt cert to
-        be issued, neither of which is guaranteed immediately after deploy.
-      - The portainer container is Alpine-based and has busybox wget available.
-      - We docker-cp a JSON payload in, then wget to localhost:9000 from inside.
+    How it works:
+      - The helper writes a bcrypt hash of the password directly into the BoltDB
+        on the portainer_data volume — no API call, no DNS, no SSL required.
+      - Portainer must NOT be running when the helper writes (exclusive DB access),
+        so we scale the service to 0 first, run the helper, then scale back to 1.
+
+    Ref: https://docs.portainer.io/admin/users/password-reset
     """
-    step("Configuring Portainer admin password via API")
+    step("Setting Portainer admin password via helper image")
 
-    # ── 1. Wait for the portainer container to be running (up to 15 min) ──────
-    info("Waiting for Portainer container to start (up to 15 min)…")
-    cid = ""
-    deadline = datetime.now().timestamp() + 900
+    # ── 1. Confirm portainer service is known to Swarm ────────────────────────
+    info("Verifying Portainer service exists in Swarm…")
+    rc, out, _ = run(
+        "docker service ls --filter name=portainer_portainer --format '{{.Name}}'",
+        check=False, silent=True,
+    )
+    if "portainer_portainer" not in out:
+        warn("Portainer service not found — skipping password setup.")
+        warn(f"Set it manually once running: https://{domain}")
+        return
+
+    # ── 2. Wait for portainer to reach 1/1 so the volume is fully initialised ─
+    info("Waiting for Portainer to reach 1/1 replicas (volume init)…")
+    deadline = datetime.now().timestamp() + 600   # 10 min max
+    ready = False
     while datetime.now().timestamp() < deadline:
-        _, out, _ = run(
-            "docker ps --filter 'label=com.docker.swarm.service.name=portainer_portainer' "
-            "--format '{{.ID}}' | head -1",
+        _, replicas, _ = run(
+            "docker service ls --filter name=portainer_portainer --format '{{.Replicas}}'",
             check=False, silent=True,
         )
-        cid = out.strip()
-        if cid:
-            ok(f"Portainer container found: {cid[:12]}")
+        if replicas.strip().startswith("1/1"):
+            ready = True
+            ok("Portainer is running (1/1)")
             break
         sleep(10)
 
-    if not cid:
-        warn("Portainer container did not start within 15 min.")
-        warn(f"Set the admin password manually at: https://{domain}")
-        return
+    if not ready:
+        warn("Portainer did not reach 1/1 within 10 min — attempting reset anyway.")
 
-    # ── 2. Wait for Portainer's internal HTTP API on localhost:9000 ───────────
-    info("Waiting for Portainer API to be ready inside container…")
-    api_ready = False
-    api_deadline = datetime.now().timestamp() + 120
-    while datetime.now().timestamp() < api_deadline:
-        rc, _, _ = run(
-            f"docker exec {cid} sh -c "
-            f"'wget -q -O /dev/null --timeout=4 http://localhost:9000/api/status'",
-            check=False, silent=True, timeout=12,
-        )
-        if rc == 0:
-            api_ready = True
-            ok("Portainer API is responding")
-            break
-        sleep(8)
+    # ── 3. Scale Portainer to 0 so the helper has exclusive DB access ─────────
+    info("Scaling Portainer to 0 for exclusive volume access…")
+    run("docker service scale portainer_portainer=0", check=False)
+    sleep(8)   # let the container fully exit before the helper opens the BoltDB
 
-    if not api_ready:
-        warn("Portainer API still not responding after 2 min — attempting password set anyway…")
+    # ── 4. Run the official helper image — bcrypt-hashes & writes directly ────
+    # Volume name is 'portainer-data' as declared in gen_portainer_yml()
+    info("Running portainer/helper-reset-password…")
+    rc, out, err = run(
+        f'docker run --rm '
+        f'-v portainer-data:/data '
+        f'portainer/helper-reset-password '
+        f'--password "{password}"',
+        check=False,
+    )
 
-    # ── 3. Copy JSON payload into container, POST via wget inside container ───
-    payload_host = Path("/tmp/portainer_init.json")
-    payload_host.write_text(json.dumps({"Username": "admin", "Password": password}))
+    # ── 5. Scale Portainer back to 1 regardless of outcome ────────────────────
+    info("Scaling Portainer back to 1…")
+    run("docker service scale portainer_portainer=1", check=False)
 
-    try:
-        run(f"docker cp {payload_host} {cid}:/tmp/portainer_init.json",
-            check=False, silent=True)
-
-        rc, out, err = run(
-            f"docker exec {cid} sh -c "
-            f"'wget -q -O- "
-            f"--post-file=/tmp/portainer_init.json "
-            f"--header=\"Content-Type: application/json\" "
-            f"http://localhost:9000/api/users/admin/init'",
-            check=False, timeout=30,
-        )
-    finally:
-        payload_host.unlink(missing_ok=True)
-
-    if out and '"jwt"' in out:
+    # ── 6. Evaluate result ────────────────────────────────────────────────────
+    if rc == 0:
         ok("Portainer admin password set successfully")
-    elif "409" in (out + err) or "already" in out.lower() or "already" in err.lower():
-        info("Portainer admin already initialised — password unchanged")
-    elif rc == 0 and out.strip():
-        ok("Portainer password API responded (password configured)")
+        ok(f"Login at https://{domain}  →  admin / <password you entered>")
     else:
-        warn(f"Automatic password set failed (rc={rc}): {(err or out or 'no response')[:160]}")
-        warn(f"Please set it manually at: https://{domain}")
+        warn(f"Helper exited with code {rc}: {(err or out or 'no output')[:200]}")
+        warn(f"Reset manually:  docker run --rm -v portainer-data:/data "
+             f"portainer/helper-reset-password --password 'yourpassword'")
 
 
 # ─── Frappe site setup ─────────────────────────────────────────────────────────
 
-FRAPPE_APPS = ["erpnext"]
+FRAPPE_APPS = ["drive","room_booking"]
 
 
 def frappe_set_config(container: str):
@@ -1827,9 +1814,8 @@ def _print_plan(t_cfg: TraefikConfig, p_cfg: PortainerConfig, envs: List[EnvConf
         if e.has_mailpit: extras.append(f"mailpit @ {e.mailpit_domain}")
         if e.has_backup:  extras.append(f"backup → {e.backup_dir}")
         extra_str = f"  [{', '.join(extras)}]" if extras else ""
-        sn_note   = f"  site={e.site_name}" if e.site_name and e.site_name != e.domain else ""
         apps_note = f"  apps: frappe, {', '.join(FRAPPE_APPS)}" if FRAPPE_APPS else "  apps: frappe"
-        print(f"    {e.stack_name:12s}  DB: {e.db_stack_name:22s}  {e.domain}{sn_note}{extra_str}")
+        print(f"    {e.stack_name:12s}  DB: {e.db_stack_name:22s}  {e.domain}{extra_str}")
         print(f"    {' ' * 12}  {DIM}{apps_note}{RESET}")
     print()
     needs_ofelia = any(e.has_backup for e in envs)
