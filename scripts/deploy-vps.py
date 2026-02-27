@@ -165,11 +165,13 @@ class PortainerConfig:
 
 @dataclass
 class EnvConfig:
-    stack_name: str       # user-supplied, e.g. "prod"
-    domain: str           # e.g. "erp.example.com"
-    image: str            # registry/org/repo  (no tag)
-    tag: str              # image tag
+    stack_name: str           # user-supplied, e.g. "prod"
+    domain: str               # Traefik routing domain, e.g. "erp.example.com"
+    image: str                # registry/org/repo  (no tag)
+    tag: str                  # image tag
     db_root_password: str
+    site_name: str = ""       # Frappe bench site name — MUST match domain (HTTP Host header)
+    site_admin_password: str = ""  # Frappe site admin login password
     has_mailpit: bool = False
     mailpit_domain: str = ""
     has_backup: bool = False
@@ -465,6 +467,10 @@ def collect_traefik() -> TraefikConfig:
     ok(f"Domain:  {domain}")
     ok(f"Email:   {email}")
     ok("Password hashed with APR1-MD5")
+    print(f"\n  {YELLOW}⚠  Note your Traefik dashboard credentials:{RESET}")
+    print(f"       Username:  admin")
+    print(f"       Password:  {BOLD}(the password you just entered){RESET}")
+    print(f"  {DIM}  These cannot be recovered from state. If lost, --reset and re-run.{RESET}\n")
     return TraefikConfig(domain=domain, email=email, hashed_password=hashed)
 
 
@@ -543,12 +549,30 @@ def collect_environments() -> tuple:
         # ── Site domain — must be unique ───────────────────────────────────────
         while True:
             domain_default = f"erp-{name}.example.com"
-            domain = ask("  Domain", domain_default)
+            domain = ask("  Routing domain (Traefik Host rule)", domain_default)
             if domain in used_domains:
                 print(f"  {RED}Domain '{domain}' is already assigned to another environment.{RESET}")
             else:
                 used_domains.add(domain)
                 break
+
+        # ── Frappe site name — defaults to domain, must match HTTP Host header ──
+        print(f"  {DIM}  Site name is what bench uses as the site folder name.{RESET}")
+        print(f"  {DIM}  It must match the domain above (browsers send it as the Host header).{RESET}")
+        site_name = ask("  Frappe site name", domain)
+        if site_name != domain:
+            warn(f"  Site name '{site_name}' differs from domain '{domain}'.")
+            warn(f"  Make sure FRAPPE_SITE_NAME_HEADER in your image config handles this.")
+
+        # ── Frappe site admin password ─────────────────────────────────────────
+        print(f"\n  {BOLD}Frappe site admin password{RESET}  (for logging in to the ERP at {domain})")
+        while True:
+            sp  = ask("  Site admin password", secret=True)
+            sp2 = ask("  Confirm password", secret=True)
+            if sp == sp2:
+                site_admin_password = sp
+                break
+            print(f"  {RED}Passwords do not match.{RESET}")
 
         print(f"\n  {BOLD}Optional services for '{name}':{RESET}")
 
@@ -574,6 +598,8 @@ def collect_environments() -> tuple:
         envs.append(EnvConfig(
             stack_name=name,
             domain=domain,
+            site_name=site_name,
+            site_admin_password=site_admin_password,
             image=image,
             tag=tag,
             db_root_password=db_pass,
@@ -582,7 +608,8 @@ def collect_environments() -> tuple:
             has_backup=has_backup,
             backup_dir=backup_dir,
         ))
-        ok(f"'{name}' → {domain}"
+        site_label = f" site={site_name}" if site_name != domain else ""
+        ok(f"'{name}' → {domain}{site_label}"
            + (f" + mailpit @ {mailpit_domain}" if has_mailpit else "")
            + (" + backup" if has_backup else ""))
 
@@ -1254,46 +1281,85 @@ def get_backend_container(stack_name: str) -> str:
 # ─── Portainer password via API ────────────────────────────────────────────────
 
 def set_portainer_admin_password(domain: str, password: str):
-    step("Configuring Portainer admin password via API")
-    payload_file = Path("/tmp/portainer-init.json")
-    payload_file.write_text(json.dumps({"Username": "admin", "Password": password}))
+    """
+    Set Portainer admin password by calling the init API from INSIDE the container.
 
-    info(f"Polling Portainer API at https://{domain} …")
-    deadline = datetime.now().timestamp() + 180   # up to 3 min
-    reachable = False
+    Why inside the container:
+      - Calling via https://domain requires DNS to resolve + Let's Encrypt cert to
+        be issued, neither of which is guaranteed immediately after deploy.
+      - The portainer container is Alpine-based and has busybox wget available.
+      - We docker-cp a JSON payload in, then wget to localhost:9000 from inside.
+    """
+    step("Configuring Portainer admin password via API")
+
+    # ── 1. Wait for the portainer container to be running (up to 15 min) ──────
+    info("Waiting for Portainer container to start (up to 15 min)…")
+    cid = ""
+    deadline = datetime.now().timestamp() + 900
     while datetime.now().timestamp() < deadline:
+        _, out, _ = run(
+            "docker ps --filter 'label=com.docker.swarm.service.name=portainer_portainer' "
+            "--format '{{.ID}}' | head -1",
+            check=False, silent=True,
+        )
+        cid = out.strip()
+        if cid:
+            ok(f"Portainer container found: {cid[:12]}")
+            break
+        sleep(10)
+
+    if not cid:
+        warn("Portainer container did not start within 15 min.")
+        warn(f"Set the admin password manually at: https://{domain}")
+        return
+
+    # ── 2. Wait for Portainer's internal HTTP API on localhost:9000 ───────────
+    info("Waiting for Portainer API to be ready inside container…")
+    api_ready = False
+    api_deadline = datetime.now().timestamp() + 120
+    while datetime.now().timestamp() < api_deadline:
         rc, _, _ = run(
-            f"curl -sf -k --max-time 5 -o /dev/null https://{domain}/api/status",
-            check=False, silent=True, timeout=15,
+            f"docker exec {cid} sh -c "
+            f"'wget -q -O /dev/null --timeout=4 http://localhost:9000/api/status'",
+            check=False, silent=True, timeout=12,
         )
         if rc == 0:
-            reachable = True
+            api_ready = True
+            ok("Portainer API is responding")
             break
         sleep(8)
 
-    if not reachable:
-        warn("Portainer API did not respond within 3 minutes.")
-        warn("Set the admin password manually on your first login.")
-        payload_file.unlink(missing_ok=True)
-        return
+    if not api_ready:
+        warn("Portainer API still not responding after 2 min — attempting password set anyway…")
 
-    rc, out, err = run(
-        f"curl -sf -k -X POST https://{domain}/api/users/admin/init "
-        f"-H 'Content-Type: application/json' "
-        f"-d @{payload_file}",
-        check=False, silent=True, timeout=20,
-    )
-    payload_file.unlink(missing_ok=True)
+    # ── 3. Copy JSON payload into container, POST via wget inside container ───
+    payload_host = Path("/tmp/portainer_init.json")
+    payload_host.write_text(json.dumps({"Username": "admin", "Password": password}))
 
-    if '"jwt"' in out:
+    try:
+        run(f"docker cp {payload_host} {cid}:/tmp/portainer_init.json",
+            check=False, silent=True)
+
+        rc, out, err = run(
+            f"docker exec {cid} sh -c "
+            f"'wget -q -O- "
+            f"--post-file=/tmp/portainer_init.json "
+            f"--header=\"Content-Type: application/json\" "
+            f"http://localhost:9000/api/users/admin/init'",
+            check=False, timeout=30,
+        )
+    finally:
+        payload_host.unlink(missing_ok=True)
+
+    if out and '"jwt"' in out:
         ok("Portainer admin password set successfully")
-    elif "409" in (out + err) or "already" in out.lower():
+    elif "409" in (out + err) or "already" in out.lower() or "already" in err.lower():
         info("Portainer admin already initialised — password unchanged")
-    elif rc == 0:
+    elif rc == 0 and out.strip():
         ok("Portainer password API responded (password configured)")
     else:
-        warn(f"Password API call failed (rc={rc}): {(err or out)[:120]}")
-        warn("Set the admin password manually on first login.")
+        warn(f"Automatic password set failed (rc={rc}): {(err or out or 'no response')[:160]}")
+        warn(f"Please set it manually at: https://{domain}")
 
 
 # ─── Frappe site setup ─────────────────────────────────────────────────────────
@@ -1325,7 +1391,8 @@ def frappe_site_exists(container: str, site: str) -> bool:
     return "SITE_EXISTS" in out
 
 
-def frappe_create_site(container: str, site: str, db_password: str) -> bool:
+def frappe_create_site(container: str, site: str,
+                       db_root_password: str, site_admin_password: str) -> bool:
     info(f"Creating site: {site}")
 
     # If the site directory already exists, skip creation
@@ -1333,44 +1400,47 @@ def frappe_create_site(container: str, site: str, db_password: str) -> bool:
         ok(f"Site '{site}' already exists — skipping creation")
         return True
 
+    # Build --install-app flags for every app in FRAPPE_APPS
+    # bench new-site installs 'frappe' automatically; list additional apps here.
+    install_flags = " ".join(f"--install-app {app}" for app in FRAPPE_APPS) if FRAPPE_APPS else ""
+
+    # Full bench new-site command:
+    #   --db-host / --db-port       → point at the mariadb container
+    #   --db-root-password          → needed to create the site DB and user
+    #   --admin-password            → sets the Frappe /login admin password
+    #   --mariadb-user-host-login-scope=% → allow DB user to connect from any container IP
+    #   --install-app <app>         → install apps atomically during site creation
+    bench_cmd = (
+        f"cd /home/frappe/frappe-bench && "
+        f"bench new-site {site} "
+        f"--db-host mariadb "
+        f"--db-port 3306 "
+        f"--db-root-password {db_root_password} "
+        f"--admin-password {site_admin_password} "
+        f"--mariadb-user-host-login-scope=% "
+        f"{install_flags}"
+    ).strip()
+
     rc, _, err = run(
-        f'docker exec {container} bash -c '
-        f'"cd /home/frappe/frappe-bench && '
-        f'bench new-site {site} --db-host=mariadb --db-port=3306"',
+        f"docker exec {container} bash -c \"{bench_cmd}\"",
         check=False,
     )
+
     if rc != 0:
-        fail(f"Site creation command failed (exit {rc}): {err[:300]}")
-        # Double-check — sometimes bench exits non-zero but site is there
+        fail(f"bench new-site failed (exit {rc}): {err[:300]}")
+        # Double-check — sometimes bench exits non-zero but site dir is there
         if frappe_site_exists(container, site):
-            warn("Exit code was non-zero but site directory was created — treating as success")
+            warn("Exit code was non-zero but site directory exists — treating as success")
             return True
         return False
 
-    # Verify site actually landed on disk
+    # Verify the site directory actually landed on disk
     if not frappe_site_exists(container, site):
         fail(f"bench new-site exited 0 but site directory '{site}' is missing — something went wrong")
         return False
 
-    ok(f"Site '{site}' created and verified")
-    return True
-
-
-def frappe_install_apps(container: str, site: str) -> bool:
-    if not FRAPPE_APPS:
-        info("No extra apps configured — skipping")
-        return True
-    apps = " ".join(FRAPPE_APPS)
-    info(f"Installing apps: {apps}")
-    rc, _, err = run(
-        f'docker exec {container} bash -c '
-        f'"cd /home/frappe/frappe-bench && bench install-app --site {site} {apps}"',
-        check=False,
-    )
-    if rc != 0:
-        warn(f"App install issues (may not be fatal): {err[:200]}")
-        return False
-    ok("Apps installed")
+    app_list = ", ".join(FRAPPE_APPS) if FRAPPE_APPS else "none"
+    ok(f"Site '{site}' created and verified  (apps installed: frappe, {app_list})")
     return True
 
 
@@ -1380,25 +1450,29 @@ def setup_frappe_site(cfg: EnvConfig, state: dict):
         info(f"Site for '{cfg.stack_name}' already set up — skipping")
         return
 
-    step(f"Setting up Frappe site: {cfg.stack_name}")
+    step(f"Setting up Frappe site: {cfg.stack_name}  →  {cfg.site_name}")
     sn = cfg.stack_name
 
-    if not wait_for_service(sn, "backend", timeout=150):
-        fail(f"Backend not ready for '{sn}' — skipping site creation")
-        state_error(state, step_key, "Backend timeout")
+    # Wait up to 15 minutes for the backend service to have 1/1 replicas
+    if not wait_for_service(sn, "backend", timeout=900):
+        fail(f"Backend not ready for '{sn}' after 15 min — skipping site creation")
+        state_error(state, step_key, "Backend 15-min timeout")
         return
 
     container = get_backend_container(sn)
     frappe_set_config(container)
     sleep(2)
 
-    if not frappe_create_site(container, cfg.domain, cfg.db_root_password):
+    # site_name is the bench site folder name; must match HTTP Host header (= domain)
+    site = cfg.site_name or cfg.domain
+
+    if not frappe_create_site(container, site, cfg.db_root_password, cfg.site_admin_password):
         state_error(state, step_key, "Site creation failed or could not be verified")
-        warn(f"Site '{cfg.domain}' was NOT created successfully.")
-        warn(f"You can retry this step by re-running the script (state is NOT marked done).")
+        warn(f"Site '{site}' was NOT created successfully.")
+        warn(f"Re-run the script to retry (this step is NOT marked done).")
         return
 
-    frappe_install_apps(container, cfg.domain)
+    # site creation already installed all apps via --install-app flags
     state_done(state, step_key)
 
 
@@ -1412,10 +1486,14 @@ def print_summary(traefik_cfg: TraefikConfig, portainer_cfg: PortainerConfig,
 
     print(f"  {BOLD}Access points{RESET}")
     print(f"    Traefik dashboard   →  https://{traefik_cfg.domain}")
+    print(f"    {DIM}login: admin / <password you set during setup>{RESET}")
     if portainer_cfg.enabled:
         print(f"    Portainer           →  https://{portainer_cfg.domain}")
+        print(f"    {DIM}login: admin / <Portainer password you set>{RESET}")
     for env in envs:
-        print(f"    {env.stack_name:14s}        →  https://{env.domain}")
+        sn = env.site_name or env.domain
+        print(f"    {env.stack_name:14s}        →  https://{env.domain}  (site: {sn})")
+        print(f"    {DIM}login: Administrator / <site admin password you set for '{env.stack_name}'>{RESET}")
         if env.has_mailpit:
             print(f"    {env.stack_name + ' mailpit':14s}  →  https://{env.mailpit_domain}")
 
@@ -1550,7 +1628,14 @@ def main():
             p_raw = dict(state["portainer"])
             p_raw.setdefault("admin_password", "")
             p_cfg = PortainerConfig(**p_raw)
-            envs  = [EnvConfig(**e) for e in state["environments"]]
+            # Backwards-compat: older states may not have site_name / site_admin_password
+            raw_envs = []
+            for e in state["environments"]:
+                e = dict(e)
+                e.setdefault("site_name", e.get("domain", ""))
+                e.setdefault("site_admin_password", "")
+                raw_envs.append(e)
+            envs  = [EnvConfig(**e) for e in raw_envs]
             github_user  = state.get("github_username", "")
             github_token = ask("GitHub PAT (to authenticate Docker pull)", secret=True)
 
@@ -1559,6 +1644,12 @@ def main():
                 if not is_done(state, "portainer_password"):
                     print(f"\n  {BOLD}Re-enter Portainer admin password (not stored in state){RESET}")
                     p_cfg.admin_password = ask("Portainer admin password", secret=True)
+
+            # Re-collect site admin passwords for envs whose site step isn't done
+            for cfg in envs:
+                if not is_done(state, f"site_{cfg.stack_name}") and not cfg.site_admin_password:
+                    print(f"\n  {BOLD}Re-enter site admin password for '{cfg.stack_name}' ({cfg.domain}){RESET}")
+                    cfg.site_admin_password = ask("  Site admin password", secret=True)
         else:
             state["completed"] = [s for s in state["completed"]
                                    if s in ("packages", "docker", "docker_group", "swarm",
@@ -1611,6 +1702,11 @@ def main():
     if not is_done(state, "traefik"):
         step("Deploying Traefik")
         deploy_stack("traefik", STACKS_DIR / "traefik.yml", wait=12)
+        info("Confirming Traefik service is running (1/1 replicas)…")
+        if wait_for_service("traefik", "traefik", timeout=120):
+            ok(f"Traefik dashboard live → https://{t_cfg.domain}  (login: admin / <your password>)")
+        else:
+            warn("Traefik replica count not 1/1 yet — check: docker service logs traefik_traefik")
         state_done(state, "traefik")
     else:
         info("Traefik already deployed")
@@ -1731,7 +1827,10 @@ def _print_plan(t_cfg: TraefikConfig, p_cfg: PortainerConfig, envs: List[EnvConf
         if e.has_mailpit: extras.append(f"mailpit @ {e.mailpit_domain}")
         if e.has_backup:  extras.append(f"backup → {e.backup_dir}")
         extra_str = f"  [{', '.join(extras)}]" if extras else ""
-        print(f"    {e.stack_name:12s}  DB: {e.db_stack_name:22s}  {e.domain}{extra_str}")
+        sn_note   = f"  site={e.site_name}" if e.site_name and e.site_name != e.domain else ""
+        apps_note = f"  apps: frappe, {', '.join(FRAPPE_APPS)}" if FRAPPE_APPS else "  apps: frappe"
+        print(f"    {e.stack_name:12s}  DB: {e.db_stack_name:22s}  {e.domain}{sn_note}{extra_str}")
+        print(f"    {' ' * 12}  {DIM}{apps_note}{RESET}")
     print()
     needs_ofelia = any(e.has_backup for e in envs)
     if needs_ofelia:
@@ -1743,6 +1842,7 @@ def _print_plan(t_cfg: TraefikConfig, p_cfg: PortainerConfig, envs: List[EnvConf
         print(f"    Ofelia (cron scheduler)  →  {DIM}NOT deployed (no environment uses backup){RESET}")
     print()
     print(f"  {DIM}Deployment order: Traefik → Portainer → [MariaDB → App] × {len(envs)}{RESET}")
+    print(f"  {DIM}Site creation:    waits up to 15 min for backend to be healthy{RESET}")
     print()
 
 
