@@ -256,11 +256,16 @@ class Docker:
     @staticmethod
     def login(username: str, token: str):
         logger.info(f"Logging in to ghcr.io as {username} ...")
-        rc = sh_live(
-            f"echo '{token}' | docker login ghcr.io -u '{username}' --password-stdin"
+        # Use subprocess directly so the token is passed via stdin and
+        # NEVER appears in logs, process list, or shell history.
+        result = subprocess.run(
+            ["docker", "login", "ghcr.io", "-u", username, "--password-stdin"],
+            input=token,
+            capture_output=True,
+            text=True,
         )
-        if rc != 0:
-            sys.exit("❌  GHCR login failed — check username and PAT token")
+        if result.returncode != 0:
+            sys.exit(f"❌  GHCR login failed:\n{result.stderr.strip()}")
         logger.info("✅ Logged in to ghcr.io")
 
 
@@ -335,7 +340,12 @@ class Setup:
         frappe_image      = ask("Frappe image (no tag)",
                                 "ghcr.io/brandclub/brand-club-erp")
         tag_name          = ask("Image tag", "main")
-        db_root_password  = ask("MariaDB root password", "StrongPass@123!")
+        print("  MariaDB root password (hidden):")
+        db_root_password = ""
+        while not db_root_password:
+            db_root_password = getpass.getpass("    Password: ").strip()
+            if not db_root_password:
+                print("    \u2191 required")
         letsencrypt_email = ask("Let's Encrypt email", required=True)
         traefik_domain    = ask("Traefik domain    e.g. traefik.example.com",
                                 required=True)
@@ -837,20 +847,23 @@ version: "3.8"
 
 services:
   traefik:
-    image: traefik:v2.11
+    image: traefik:v3.6
     command:
-      - --api=true
-      - --api.dashboard=true
+      # Swarm provider (v3 syntax — replaces v2's --providers.docker.swarmMode)
+      - --providers.swarm.endpoint=unix:///var/run/docker.sock
+      - --providers.swarm.exposedbydefault=false
+      - --providers.swarm.network=traefik-public
+      # Keep docker provider for non-swarm containers (e.g. portainer agent)
       - --providers.docker=true
-      - --providers.docker.swarmMode=true
-      - --providers.docker.network=traefik-public
-      - --providers.docker.exposedByDefault=false
+      - --providers.docker.exposedbydefault=false
       - --providers.docker.constraints=Label(`traefik.constraint-label`,`traefik-public`)
       - --entrypoints.http.address=:80
       - --entrypoints.https.address=:443
       - --certificatesresolvers.le.acme.email={cfg.letsencrypt_email}
       - --certificatesresolvers.le.acme.storage=/certificates/acme.json
       - --certificatesresolvers.le.acme.tlschallenge=true
+      - --api=true
+      - --api.dashboard=true
       - --log.level=INFO
     deploy:
       placement:
@@ -860,15 +873,21 @@ services:
         condition: on-failure
       labels:
         - traefik.enable=true
-        - traefik.docker.network=traefik-public
+        - traefik.swarm.network=traefik-public
         - traefik.constraint-label=traefik-public
-        - traefik.http.routers.traefik-dash.rule=Host(`{cfg.traefik_domain}`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))
+        # HTTP → HTTPS redirect middleware (used by all other stacks)
+        - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
+        - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
+        # Dashboard — HTTP (redirect only)
+        - traefik.http.routers.traefik-http.rule=Host(`{cfg.traefik_domain}`)
+        - traefik.http.routers.traefik-http.entrypoints=http
+        - traefik.http.routers.traefik-http.middlewares=https-redirect
+        # Dashboard — HTTPS
+        - traefik.http.routers.traefik-dash.rule=Host(`{cfg.traefik_domain}`)
         - traefik.http.routers.traefik-dash.entrypoints=https
         - traefik.http.routers.traefik-dash.tls=true
         - traefik.http.routers.traefik-dash.tls.certresolver=le
         - traefik.http.routers.traefik-dash.service=api@internal
-        - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
-        - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
         - traefik.http.services.traefik-svc.loadbalancer.server.port=8080
     ports:
       - target: 80
