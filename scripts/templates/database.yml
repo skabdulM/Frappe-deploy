@@ -1,0 +1,55 @@
+version: "3.8"
+# ── MariaDB database stack — environment: __STACK_NAME__ ─────────────────────
+# Managed by deploy-vps.py — do not edit manually.
+# Network: __DB_NETWORK__ (overlay, attachable — app stack attaches as external)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  mariadb:
+    image: mariadb:10.6
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: __MEM_LIMIT__
+        reservations:
+          memory: __MEM_RESERVE__
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+      - --max-connections=500
+      - --innodb-buffer-pool-size=__BUFFER_POOL__
+      - --innodb-log-file-size=__LOG_SIZE__
+      - --innodb-flush-log-at-trx-commit=2
+      - --innodb-flush-method=O_DIRECT
+      - --slow-query-log=1
+      - --slow-query-log-file=/var/lib/mysql/slow.log
+      - --long-query-time=2
+    environment:
+      MYSQL_ROOT_PASSWORD: __DB_ROOT_PASSWORD__
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    networks:
+      - __DB_NETWORK__
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p__DB_ROOT_PASSWORD__"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mariadb-data:
+    name: __STACK_NAME__-mariadb-data
+
+networks:
+  __DB_NETWORK__:
+    name: __DB_NETWORK__
+    driver: overlay
+    attachable: true

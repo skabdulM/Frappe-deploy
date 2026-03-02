@@ -1,0 +1,50 @@
+# ── backup-sites (replicas:0 — triggered by swarm-cronjob on schedule) ────
+  # swarm-cronjob calls the Swarm SERVICE API to scale this to 1 on schedule.
+  # The task runs bench backup, copies output to the host bind-mount, prunes
+  # old sets, then exits. restart_policy:none ensures Swarm never auto-restarts.
+  #
+  # $$(var) → Docker Compose interprets $$ as literal $ → bash sees $(var).
+  # Future S3/restic: extend the command block only — labels/volumes unchanged.
+  backup-sites:
+    image: __IMAGE__
+    deploy:
+      mode: replicated
+      replicas: 0
+      restart_policy:
+        condition: none
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "swarm.cronjob.enable=true"
+        - "swarm.cronjob.schedule=__BACKUP_SCHEDULE__"
+        - "swarm.cronjob.skip-running=true"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Backup started: $$(date) ==="
+        cd /home/frappe/frappe-bench
+        bench --site __SITE__ backup --with-files
+        SRC=/home/frappe/frappe-bench/sites/__SITE__/private/backups
+        DEST=/backups/__SITE__
+        mkdir -p "$$DEST"
+        LATEST=$$(ls -t "$$SRC" | grep database | head -1 | sed "s/-database.*//")
+        [ -z "$$LATEST" ] && echo "ERROR: no backup produced" >&2 && exit 1
+        cp "$$SRC/$${LATEST}-"* "$$DEST/"
+        echo "Copied $${LATEST}-*  to  $$DEST"
+        cd "$$DEST"
+        ls -t *-database.sql.gz 2>/dev/null | tail -n +__KEEP_PLUS_ONE__ | while read F; do
+          P="$${F%-database.sql.gz}"
+          rm -f "$${P}"-*.sql.gz "$${P}"-*.tar.gz
+          echo "Pruned: $$P"
+        done
+        TOTAL=$$(ls *-database.sql.gz 2>/dev/null | wc -l)
+        echo "Retained: $$TOTAL / __KEEP__ sets"
+        echo "=== Backup complete: $$(date) ==="
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - backups:/backups
+    networks:
+      - __APP_NETWORK__
+      - __DB_NETWORK__

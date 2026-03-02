@@ -1,0 +1,255 @@
+version: "3.8"
+# ── Application stack: __STACK_NAME__ ────────────────────────────────────────
+# Domain:  __DOMAIN__
+# Image:   __IMAGE__
+# DB net:  __DB_NETWORK__  (external — created by database-__STACK_NAME__ stack)
+# Mailpit: shared-services joins this network with alias mailpit:1025
+# Backup:  __BACKUP_HEADER__
+# Managed by deploy-vps.py — do not edit manually.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Gunicorn / Frappe application backend ────────────────────────────────
+  backend:
+    image: __IMAGE__
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      FRAPPE_SITE_NAME_HEADER: $$host
+      SOCKETIO_PORT: "9000"
+      # Mailpit SMTP — shared-services joins this network with alias 'mailpit'
+      MAIL_SERVER: mailpit
+      MAIL_PORT: "1025"
+      MAIL_LOGIN: ""
+      MAIL_PASSWORD: ""
+      MAIL_USE_SSL: "0"
+      MAIL_USE_TLS: "0"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - __APP_NETWORK__
+      - __DB_NETWORK__
+
+  # ── Nginx frontend — exposed through Traefik ──────────────────────────────
+  frontend:
+    image: __IMAGE__
+    command: ["nginx-entrypoint.sh"]
+    deploy:
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=traefik-public"
+        - "traefik.constraint-label=traefik-public"
+        - "traefik.http.routers.__STACK_NAME__-http.rule=Host(`__DOMAIN__`)"
+        - "traefik.http.routers.__STACK_NAME__-http.entrypoints=http"
+        - "traefik.http.routers.__STACK_NAME__-http.middlewares=https-redirect"
+        - "traefik.http.routers.__STACK_NAME__-https.rule=Host(`__DOMAIN__`)"
+        - "traefik.http.routers.__STACK_NAME__-https.entrypoints=https"
+        - "traefik.http.routers.__STACK_NAME__-https.tls=true"
+        - "traefik.http.routers.__STACK_NAME__-https.tls.certresolver=le"
+        - "traefik.http.routers.__STACK_NAME__-https.middlewares=__STACK_NAME__-sec"
+        - "traefik.http.services.__STACK_NAME__.loadbalancer.server.port=8080"
+        - "traefik.http.services.__STACK_NAME__.loadbalancer.sticky.cookie=true"
+        - "traefik.http.services.__STACK_NAME__.loadbalancer.sticky.cookie.name=__STACK_NAME___lb"
+        - "traefik.http.middlewares.__STACK_NAME__-sec.headers.stsSeconds=31536000"
+        - "traefik.http.middlewares.__STACK_NAME__-sec.headers.stsIncludeSubdomains=true"
+        - "traefik.http.middlewares.__STACK_NAME__-sec.headers.stsPreload=true"
+        - "traefik.http.middlewares.__STACK_NAME__-sec.headers.frameDeny=true"
+        - "traefik.http.middlewares.__STACK_NAME__-sec.headers.contentTypeNosniff=true"
+        - "traefik.http.middlewares.__STACK_NAME__-sec.headers.browserXssFilter=true"
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: $$host
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      CLIENT_MAX_BODY_SIZE: 100m
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - __APP_NETWORK__
+      - traefik-public
+
+  # ── WebSocket (real-time notifications) ──────────────────────────────────
+  websocket:
+    image: __IMAGE__
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    deploy:
+      restart_policy:
+        condition: on-failure
+    environment:
+      REDIS_QUEUE: redis-queue:6379
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - __APP_NETWORK__
+
+  # ── Background workers ────────────────────────────────────────────────────
+  queue-default:
+    image: __IMAGE__
+    command: ["bench", "worker", "--queue", "default"]
+    deploy:
+      restart_policy:
+        condition: on-failure
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: mariadb
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - __APP_NETWORK__
+      - __DB_NETWORK__
+
+  queue-short:
+    image: __IMAGE__
+    command: ["bench", "worker", "--queue", "short"]
+    deploy:
+      restart_policy:
+        condition: on-failure
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: mariadb
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - __APP_NETWORK__
+      - __DB_NETWORK__
+
+  queue-long:
+    image: __IMAGE__
+    command: ["bench", "worker", "--queue", "long"]
+    deploy:
+      restart_policy:
+        condition: on-failure
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: mariadb
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - __APP_NETWORK__
+      - __DB_NETWORK__
+
+  # ── Frappe scheduler (cron-based background jobs) ─────────────────────────
+  scheduler:
+    image: __IMAGE__
+    command: ["bench", "schedule"]
+    deploy:
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    environment:
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      DB_HOST: mariadb
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - __APP_NETWORK__
+      - __DB_NETWORK__
+
+  # ── One-shot migration runner ─────────────────────────────────────────────
+  # Runs bench migrate on deploy then exits (replicas show 0/1 — that is correct).
+  # Re-run manually: docker service scale __STACK_NAME___migration=1
+  migration:
+    image: __IMAGE__
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: none
+      placement:
+        constraints:
+          - node.role == manager
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        bench --site all set-config -p maintenance_mode 1
+        bench --site all set-config -p pause_scheduler 1
+        bench --site all migrate
+        bench --site all set-config -p maintenance_mode 0
+        bench --site all set-config -p pause_scheduler 0
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    networks:
+      - __APP_NETWORK__
+      - __DB_NETWORK__
+
+  # ── Redis cache (non-persistent, LRU eviction) ────────────────────────────
+  redis-cache:
+    image: redis:6.2-alpine
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    deploy:
+      restart_policy:
+        condition: on-failure
+    volumes:
+      - redis-cache-data:/data
+    networks:
+      - __APP_NETWORK__
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Redis queue (persistent, append-only log) ─────────────────────────────
+  redis-queue:
+    image: redis:6.2-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    deploy:
+      restart_policy:
+        condition: on-failure
+    volumes:
+      - redis-queue-data:/data
+    networks:
+      - __APP_NETWORK__
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+__BACKUP_SERVICE__
+volumes:
+  sites:
+    name: __STACK_NAME__-sites
+  logs:
+    name: __STACK_NAME__-logs
+  redis-cache-data:
+    name: __STACK_NAME__-redis-cache
+  redis-queue-data:
+    name: __STACK_NAME__-redis-queue
+__BACKUP_VOLUME__
+networks:
+  __APP_NETWORK__:
+    name: __APP_NETWORK__
+    driver: overlay
+    attachable: true
+
+  __DB_NETWORK__:
+    external: true
+    name: __DB_NETWORK__
+
+  traefik-public:
+    external: true
+    name: traefik-public

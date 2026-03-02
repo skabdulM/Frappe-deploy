@@ -1,0 +1,13 @@
+version: "3.8"
+# ── Shared services stack ─────────────────────────────────────────────────────
+# Mailpit:       __MAILPIT_NOTE__
+# swarm-cronjob: __CRONJOB_NOTE__
+#
+# Deploy ORDER: after ALL app stacks — this stack joins their overlay networks.
+# Managed by deploy-vps.py — do not edit manually.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+__SERVICES_BLOCK__
+networks:
+__NETWORKS_BLOCK__

@@ -1,0 +1,64 @@
+version: "3.8"
+# ── Portainer CE — Docker Swarm management UI ─────────────────────────────────
+# Managed by deploy-vps.py — do not edit manually.
+# Version: __PORTAINER_VERSION__
+# UI: https://__PORTAINER_DOMAIN__
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  agent:
+    image: portainer/agent:__PORTAINER_VERSION__
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.platform.os == linux
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/volumes:/var/lib/docker/volumes
+    networks:
+      - portainer-agent
+
+  portainer:
+    image: portainer/portainer-ce:__PORTAINER_VERSION__
+    command: -H tcp://tasks.agent:9001 --tlsskipverify
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.swarm.network=traefik-public"
+        - "traefik.constraint-label=traefik-public"
+        - "traefik.http.routers.portainer-http.rule=Host(`__PORTAINER_DOMAIN__`)"
+        - "traefik.http.routers.portainer-http.entrypoints=http"
+        - "traefik.http.routers.portainer-http.middlewares=https-redirect"
+        - "traefik.http.routers.portainer-https.rule=Host(`__PORTAINER_DOMAIN__`)"
+        - "traefik.http.routers.portainer-https.entrypoints=https"
+        - "traefik.http.routers.portainer-https.tls=true"
+        - "traefik.http.routers.portainer-https.tls.certresolver=le"
+        - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+    volumes:
+      - portainer-data:/data
+    networks:
+      - portainer-agent
+      - traefik-public
+
+volumes:
+  portainer-data:
+    name: portainer-data
+
+networks:
+  portainer-agent:
+    driver: overlay
+    attachable: true
+    name: portainer-agent
+  traefik-public:
+    external: true
+    name: traefik-public
